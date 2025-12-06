@@ -21,12 +21,21 @@ pub struct Editor {
     clipboard: String,
     /// Message to display in status bar
     message: Option<String>,
+    /// Escape key timeout in milliseconds (for Alt key detection)
+    escape_time: u64,
 }
 
 impl Editor {
     pub fn new() -> Result<Self> {
         let mut screen = Screen::new()?;
         screen.enter_raw_mode()?;
+
+        // Read escape timeout from environment, default to 5ms
+        // Similar to vim's ttimeoutlen or tmux's escape-time
+        let escape_time = std::env::var("FAC_ESCAPE_TIME")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
 
         Ok(Self {
             buffer: Buffer::new(),
@@ -38,6 +47,7 @@ impl Editor {
             history: History::new(),
             clipboard: String::new(),
             message: None,
+            escape_time,
         })
     }
 
@@ -58,7 +68,7 @@ impl Editor {
         while self.running {
             // Block until an event is available (no busy polling)
             match event::read()? {
-                Event::Key(key_event) => self.handle_key(key_event)?,
+                Event::Key(key_event) => self.process_key(key_event)?,
                 Event::Resize(cols, rows) => {
                     self.screen.cols = cols;
                     self.screen.rows = rows;
@@ -69,7 +79,7 @@ impl Editor {
             // Process any additional queued events before rendering
             while event::poll(Duration::from_millis(0))? {
                 match event::read()? {
-                    Event::Key(key_event) => self.handle_key(key_event)?,
+                    Event::Key(key_event) => self.process_key(key_event)?,
                     Event::Resize(cols, rows) => {
                         self.screen.cols = cols;
                         self.screen.rows = rows;
@@ -87,6 +97,51 @@ impl Editor {
         Ok(())
     }
 
+    /// Process a key event, handling ESC as potential Alt prefix
+    fn process_key(&mut self, key_event: KeyEvent) -> Result<()> {
+        use crossterm::event::KeyCode;
+
+        // Check if this is a bare Escape key (potential Alt prefix)
+        if key_event.code == KeyCode::Esc && key_event.modifiers.is_empty() {
+            // Check if more data is available within escape_time
+            // Escape sequences from terminals arrive together, so short timeouts work
+            let timeout = Duration::from_millis(self.escape_time);
+
+            if event::poll(timeout)? {
+                if let Event::Key(next_event) = event::read()? {
+                    // Check for CSI sequences (ESC [ ...) which are arrow keys etc.
+                    if next_event.code == KeyCode::Char('[') {
+                        // CSI sequence - read the rest
+                        if event::poll(timeout)? {
+                            if let Event::Key(csi_event) = event::read()? {
+                                let mods = Modifiers { alt: true, ..Default::default() };
+                                return match csi_event.code {
+                                    KeyCode::Char('A') => self.handle_key_with_mods(Key::Up, mods),
+                                    KeyCode::Char('B') => self.handle_key_with_mods(Key::Down, mods),
+                                    KeyCode::Char('C') => self.handle_key_with_mods(Key::Right, mods),
+                                    KeyCode::Char('D') => self.handle_key_with_mods(Key::Left, mods),
+                                    _ => Ok(()), // Unknown CSI sequence
+                                };
+                            }
+                        }
+                        return Ok(()); // Incomplete CSI
+                    }
+
+                    // Regular Alt+key (ESC followed by a normal key)
+                    let (key, mut mods) = Key::from_crossterm(next_event);
+                    mods.alt = true;
+                    return self.handle_key_with_mods(key, mods);
+                }
+            }
+            // No key followed - it's a real Escape
+            return self.handle_key_with_mods(Key::Escape, Modifiers::default());
+        }
+
+        // Normal key processing
+        let (key, mods) = Key::from_crossterm(key_event);
+        self.handle_key_with_mods(key, mods)
+    }
+
     fn render(&mut self) -> Result<()> {
         self.screen.render(
             &self.buffer,
@@ -97,9 +152,7 @@ impl Editor {
         )
     }
 
-    fn handle_key(&mut self, key_event: KeyEvent) -> Result<()> {
-        let (key, mods) = Key::from_crossterm(key_event);
-
+    fn handle_key_with_mods(&mut self, key: Key, mods: Modifiers) -> Result<()> {
         // Clear message on any key
         self.message = None;
 
@@ -182,8 +235,8 @@ impl Editor {
                 self.delete_backward();
             }
             (Key::Delete, _) => self.delete_forward(),
-            (Key::Tab, Modifiers { shift: false, .. }) => self.insert_tab(),
-            (Key::Tab, Modifiers { shift: true, .. }) => self.dedent(),
+            (Key::Tab, _) => self.insert_tab(),
+            (Key::BackTab, _) => self.dedent(),
 
             // Delete word backward: Ctrl+W
             (Key::Char('w'), Modifiers { ctrl: true, .. }) => self.delete_word_backward(),
@@ -257,9 +310,20 @@ impl Editor {
                 while col > 0 && chars.get(col - 1).map_or(false, |c| c.is_whitespace()) {
                     col -= 1;
                 }
-                // Skip word characters
-                while col > 0 && chars.get(col - 1).map_or(false, |c| c.is_alphanumeric() || *c == '_') {
-                    col -= 1;
+                // Determine what kind of characters to skip based on char before cursor
+                if col > 0 {
+                    let prev_char = chars[col - 1];
+                    if is_word_char(prev_char) {
+                        // Skip word characters
+                        while col > 0 && chars.get(col - 1).map_or(false, |c| is_word_char(*c)) {
+                            col -= 1;
+                        }
+                    } else {
+                        // Skip punctuation/symbols
+                        while col > 0 && chars.get(col - 1).map_or(false, |c| !is_word_char(*c) && !c.is_whitespace()) {
+                            col -= 1;
+                        }
+                    }
                 }
             }
         }
@@ -280,9 +344,19 @@ impl Editor {
 
         if let Some(line_str) = self.buffer.line_str(line) {
             let chars: Vec<char> = line_str.chars().collect();
-            // Skip word characters
-            while col < chars.len() && chars.get(col).map_or(false, |c| c.is_alphanumeric() || *c == '_') {
-                col += 1;
+            if col < chars.len() {
+                let curr_char = chars[col];
+                if is_word_char(curr_char) {
+                    // Skip word characters
+                    while col < chars.len() && chars.get(col).map_or(false, |c| is_word_char(*c)) {
+                        col += 1;
+                    }
+                } else if !curr_char.is_whitespace() {
+                    // Skip punctuation/symbols
+                    while col < chars.len() && chars.get(col).map_or(false, |c| !is_word_char(*c) && !c.is_whitespace()) {
+                        col += 1;
+                    }
+                }
             }
             // Skip whitespace
             while col < chars.len() && chars.get(col).map_or(false, |c| c.is_whitespace()) {
@@ -407,7 +481,34 @@ impl Editor {
     }
 
     fn insert_tab(&mut self) {
-        self.insert_text("    ");
+        if self.cursor.has_selection() {
+            self.indent_selection();
+        } else {
+            self.insert_text("    ");
+        }
+    }
+
+    /// Indent all lines in selection
+    fn indent_selection(&mut self) {
+        if let Some((start, end)) = self.cursor.selection_bounds() {
+            let cursor_before = self.cursor_pos();
+            self.history.begin_group();
+
+            // Indent each line from start to end (inclusive)
+            for line_idx in start.line..=end.line {
+                let line_start = self.buffer.line_col_to_char(line_idx, 0);
+                let indent = "    ";
+                self.buffer.insert(line_start, indent);
+                self.history.record_insert(line_start, indent.to_string(), cursor_before, cursor_before);
+            }
+
+            // Adjust selection to cover the indented text
+            self.cursor.anchor_col += 4;
+            self.cursor.col += 4;
+            self.cursor.desired_col = self.cursor.col;
+
+            self.history.end_group();
+        }
     }
 
     fn delete_backward(&mut self) {
@@ -511,21 +612,65 @@ impl Editor {
     }
 
     fn dedent(&mut self) {
-        if let Some(line_str) = self.buffer.line_str(self.cursor.line) {
+        if self.cursor.has_selection() {
+            self.dedent_selection();
+        } else {
+            self.dedent_line(self.cursor.line);
+            self.history.maybe_break_group();
+        }
+    }
+
+    /// Dedent a single line, returns number of spaces removed
+    fn dedent_line(&mut self, line_idx: usize) -> usize {
+        if let Some(line_str) = self.buffer.line_str(line_idx) {
             let spaces_to_remove = line_str.chars().take(4).take_while(|c| *c == ' ').count();
             if spaces_to_remove > 0 {
                 let cursor_before = self.cursor_pos();
-                let line_start = self.buffer.line_col_to_char(self.cursor.line, 0);
+                let line_start = self.buffer.line_col_to_char(line_idx, 0);
                 let deleted: String = " ".repeat(spaces_to_remove);
 
                 self.buffer.delete(line_start, line_start + spaces_to_remove);
-                self.cursor.col = self.cursor.col.saturating_sub(spaces_to_remove);
-                self.cursor.desired_col = self.cursor.col;
+
+                // Only adjust cursor if this is the cursor's line
+                if line_idx == self.cursor.line {
+                    self.cursor.col = self.cursor.col.saturating_sub(spaces_to_remove);
+                    self.cursor.desired_col = self.cursor.col;
+                }
 
                 let cursor_after = self.cursor_pos();
                 self.history.record_delete(line_start, deleted, cursor_before, cursor_after);
-                self.history.maybe_break_group();
+                return spaces_to_remove;
             }
+        }
+        0
+    }
+
+    /// Dedent all lines in selection
+    fn dedent_selection(&mut self) {
+        if let Some((start, end)) = self.cursor.selection_bounds() {
+            self.history.begin_group();
+
+            let mut total_removed_anchor_line = 0;
+            let mut total_removed_cursor_line = 0;
+
+            // Dedent each line from start to end (inclusive)
+            // We need to track adjustments carefully since positions shift
+            for line_idx in start.line..=end.line {
+                let removed = self.dedent_line(line_idx);
+                if line_idx == self.cursor.anchor_line {
+                    total_removed_anchor_line = removed;
+                }
+                if line_idx == self.cursor.line {
+                    total_removed_cursor_line = removed;
+                }
+            }
+
+            // Adjust selection columns
+            self.cursor.anchor_col = self.cursor.anchor_col.saturating_sub(total_removed_anchor_line);
+            self.cursor.col = self.cursor.col.saturating_sub(total_removed_cursor_line);
+            self.cursor.desired_col = self.cursor.col;
+
+            self.history.end_group();
         }
     }
 
@@ -533,22 +678,27 @@ impl Editor {
 
     fn move_line_up(&mut self) {
         if self.cursor.line > 0 {
+            let cursor_before = self.cursor_pos();
             self.history.begin_group();
 
             let curr_line = self.cursor.line;
             let prev_line = curr_line - 1;
 
             let curr_content = self.buffer.line_str(curr_line).unwrap_or_default();
-            let _prev_content = self.buffer.line_str(prev_line).unwrap_or_default();
 
-            // Delete current line (including newline)
+            // Delete current line (including its newline)
             let curr_start = self.buffer.line_col_to_char(curr_line, 0);
-            let curr_end = curr_start + curr_content.len() + 1; // +1 for newline
-            self.buffer.delete(curr_start.saturating_sub(1), curr_end.saturating_sub(1));
+            let delete_start = curr_start.saturating_sub(1); // Include newline before
+            let delete_end = curr_start + curr_content.len();
+            let deleted: String = self.buffer.slice(delete_start, delete_end).chars().collect();
+            self.buffer.delete(delete_start, delete_end);
+            self.history.record_delete(delete_start, deleted, cursor_before, cursor_before);
 
             // Insert current line before previous line
             let prev_start = self.buffer.line_col_to_char(prev_line, 0);
-            self.buffer.insert(prev_start, &format!("{}\n", curr_content));
+            let insert_text = format!("{}\n", curr_content);
+            self.buffer.insert(prev_start, &insert_text);
+            self.history.record_insert(prev_start, insert_text, cursor_before, Position::new(prev_line, self.cursor.col));
 
             self.cursor.line = prev_line;
             self.history.end_group();
@@ -557,22 +707,26 @@ impl Editor {
 
     fn move_line_down(&mut self) {
         if self.cursor.line + 1 < self.buffer.line_count() {
+            let cursor_before = self.cursor_pos();
             self.history.begin_group();
 
             let curr_line = self.cursor.line;
             let next_line = curr_line + 1;
 
             let curr_content = self.buffer.line_str(curr_line).unwrap_or_default();
-            let _next_content = self.buffer.line_str(next_line).unwrap_or_default();
 
-            // Delete current line (including newline before next)
+            // Delete current line (including newline after)
             let curr_start = self.buffer.line_col_to_char(curr_line, 0);
             let next_start = self.buffer.line_col_to_char(next_line, 0);
+            let deleted: String = self.buffer.slice(curr_start, next_start).chars().collect();
             self.buffer.delete(curr_start, next_start);
+            self.history.record_delete(curr_start, deleted, cursor_before, cursor_before);
 
-            // Insert current line after next line
-            let new_next_end = self.buffer.line_col_to_char(curr_line, self.buffer.line_len(curr_line));
-            self.buffer.insert(new_next_end, &format!("\n{}", curr_content));
+            // Insert current line after what was the next line (now at curr_line)
+            let new_line_end = self.buffer.line_col_to_char(curr_line, self.buffer.line_len(curr_line));
+            let insert_text = format!("\n{}", curr_content);
+            self.buffer.insert(new_line_end, &insert_text);
+            self.history.record_insert(new_line_end, insert_text, cursor_before, Position::new(next_line, self.cursor.col));
 
             self.cursor.line = next_line;
             self.history.end_group();
@@ -580,24 +734,35 @@ impl Editor {
     }
 
     fn duplicate_line_up(&mut self) {
+        let cursor_before = self.cursor_pos();
         self.history.begin_group();
         let content = self.buffer.line_str(self.cursor.line).unwrap_or_default();
         let line_start = self.buffer.line_col_to_char(self.cursor.line, 0);
-        self.buffer.insert(line_start, &format!("{}\n", content));
+        let insert_text = format!("{}\n", content);
+        self.buffer.insert(line_start, &insert_text);
+        // Cursor stays on same logical line (now shifted down by 1)
+        self.cursor.line += 1;
+        let cursor_after = self.cursor_pos();
+        self.history.record_insert(line_start, insert_text, cursor_before, cursor_after);
         self.history.end_group();
     }
 
     fn duplicate_line_down(&mut self) {
+        let cursor_before = self.cursor_pos();
         self.history.begin_group();
         let content = self.buffer.line_str(self.cursor.line).unwrap_or_default();
         let line_end = self.buffer.line_col_to_char(self.cursor.line, self.buffer.line_len(self.cursor.line));
-        self.buffer.insert(line_end, &format!("\n{}", content));
+        let insert_text = format!("\n{}", content);
+        self.buffer.insert(line_end, &insert_text);
         self.cursor.line += 1;
+        let cursor_after = self.cursor_pos();
+        self.history.record_insert(line_end, insert_text, cursor_before, cursor_after);
         self.history.end_group();
     }
 
     fn join_lines(&mut self) {
         if self.cursor.line + 1 < self.buffer.line_count() {
+            let cursor_before = self.cursor_pos();
             self.history.begin_group();
 
             let line_len = self.buffer.line_len(self.cursor.line);
@@ -610,6 +775,8 @@ impl Editor {
             self.cursor.col = line_len;
             self.cursor.desired_col = self.cursor.col;
 
+            let cursor_after = self.cursor_pos();
+            self.history.record_delete(idx, "\n".to_string(), cursor_before, cursor_after);
             self.history.end_group();
         }
     }
@@ -646,23 +813,41 @@ impl Editor {
             // Cut current line
             if let Some(line) = self.buffer.line_str(self.cursor.line) {
                 self.clipboard = format!("{}\n", line);
+                let cursor_before = self.cursor_pos();
 
                 let line_start = self.buffer.line_col_to_char(self.cursor.line, 0);
-                let line_end = line_start + line.len() + 1; // +1 for newline
 
                 if self.cursor.line + 1 < self.buffer.line_count() {
+                    // Not the last line - delete line including its newline
+                    let line_end = line_start + line.len() + 1;
+                    let deleted: String = self.buffer.slice(line_start, line_end).chars().collect();
                     self.buffer.delete(line_start, line_end);
+                    self.cursor.col = 0;
+                    self.cursor.desired_col = 0;
+                    let cursor_after = self.cursor_pos();
+                    self.history.record_delete(line_start, deleted, cursor_before, cursor_after);
                 } else if self.cursor.line > 0 {
-                    // Last line - delete newline before it too
-                    self.buffer.delete(line_start.saturating_sub(1), line_start + line.len());
+                    // Last line with content - delete newline before it and the line
+                    let delete_start = line_start.saturating_sub(1);
+                    let delete_end = line_start + line.len();
+                    let deleted: String = self.buffer.slice(delete_start, delete_end).chars().collect();
+                    self.buffer.delete(delete_start, delete_end);
                     self.cursor.line -= 1;
+                    self.cursor.col = 0;
+                    self.cursor.desired_col = 0;
+                    let cursor_after = self.cursor_pos();
+                    self.history.record_delete(delete_start, deleted, cursor_before, cursor_after);
                 } else {
                     // Only line - just clear it
-                    self.buffer.delete(line_start, line_start + line.len());
+                    if !line.is_empty() {
+                        self.buffer.delete(line_start, line_start + line.len());
+                        self.cursor.col = 0;
+                        self.cursor.desired_col = 0;
+                        let cursor_after = self.cursor_pos();
+                        self.history.record_delete(line_start, line.clone(), cursor_before, cursor_after);
+                    }
                 }
 
-                self.cursor.col = 0;
-                self.cursor.desired_col = 0;
                 self.message = Some("Cut line".to_string());
             }
         }
@@ -750,4 +935,9 @@ impl Drop for Editor {
     fn drop(&mut self) {
         let _ = self.screen.leave_raw_mode();
     }
+}
+
+/// Check if a character is a "word" character (alphanumeric or underscore)
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
