@@ -13,6 +13,12 @@ use std::io::{stdout, Stdout, Write};
 use crate::buffer::Buffer;
 use crate::editor::{Cursor, Position};
 
+// Editor color scheme (256-color palette)
+const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
+const CURRENT_LINE_BG: Color = Color::AnsiValue(236);    // Slightly lighter for current line
+const LINE_NUM_COLOR: Color = Color::AnsiValue(243);     // Gray for line numbers
+const CURRENT_LINE_NUM_COLOR: Color = Color::Yellow;     // Yellow for active line number
+
 /// Terminal screen renderer
 pub struct Screen {
     stdout: Stdout,
@@ -99,15 +105,23 @@ impl Screen {
         // Draw text area
         for row in 0..text_rows {
             let line_idx = viewport_line + row;
+            let is_current_line = line_idx == cursor.line;
             execute!(self.stdout, MoveTo(0, row as u16))?;
 
             if line_idx < buffer.line_count() {
-                // Line number
+                // Line number with appropriate color
+                let line_num_fg = if is_current_line {
+                    CURRENT_LINE_NUM_COLOR
+                } else {
+                    LINE_NUM_COLOR
+                };
+                let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
+
                 execute!(
                     self.stdout,
-                    SetForegroundColor(Color::DarkGrey),
+                    SetBackgroundColor(line_bg),
+                    SetForegroundColor(line_num_fg),
                     Print(format!("{:>width$} ", line_idx + 1, width = line_num_width)),
-                    ResetColor
                 )?;
 
                 // Line content with selection highlighting
@@ -117,20 +131,28 @@ impl Screen {
                         line_idx,
                         text_cols,
                         selection.as_ref(),
+                        is_current_line,
                     )?;
                 }
+
+                // Fill rest of line with background color
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    Clear(ClearType::UntilNewLine),
+                    ResetColor
+                )?;
             } else {
                 // Empty line indicator
                 execute!(
                     self.stdout,
+                    SetBackgroundColor(BG_COLOR),
                     SetForegroundColor(Color::DarkBlue),
                     Print(format!("{:>width$} ", "~", width = line_num_width)),
+                    Clear(ClearType::UntilNewLine),
                     ResetColor
                 )?;
             }
-
-            // Clear rest of line
-            execute!(self.stdout, Clear(ClearType::UntilNewLine))?;
         }
 
         // Status bar
@@ -155,8 +177,10 @@ impl Screen {
         line_idx: usize,
         max_cols: usize,
         selection: Option<&(Position, Position)>,
+        is_current_line: bool,
     ) -> Result<()> {
         let chars: Vec<char> = line.chars().take(max_cols).collect();
+        let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
 
         if let Some((start, end)) = selection {
             // Check if this line has any selection
@@ -170,7 +194,11 @@ impl Screen {
                 // Before selection
                 if sel_start_col > 0 {
                     let before: String = chars[..sel_start_col.min(chars.len())].iter().collect();
-                    execute!(self.stdout, Print(&before))?;
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(line_bg),
+                        Print(&before)
+                    )?;
                 }
 
                 // Selection (highlighted)
@@ -181,6 +209,7 @@ impl Screen {
                         SetBackgroundColor(Color::Blue),
                         SetForegroundColor(Color::White),
                         Print(&selected),
+                        SetBackgroundColor(line_bg),
                         ResetColor
                     )?;
                 }
@@ -188,17 +217,29 @@ impl Screen {
                 // After selection
                 if sel_end_col < chars.len() {
                     let after: String = chars[sel_end_col..].iter().collect();
-                    execute!(self.stdout, Print(&after))?;
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(line_bg),
+                        Print(&after)
+                    )?;
                 }
             } else {
                 // No selection on this line
                 let visible: String = chars.iter().collect();
-                execute!(self.stdout, Print(&visible))?;
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    Print(&visible)
+                )?;
             }
         } else {
             // No selection at all
             let visible: String = chars.iter().collect();
-            execute!(self.stdout, Print(&visible))?;
+            execute!(
+                self.stdout,
+                SetBackgroundColor(line_bg),
+                Print(&visible)
+            )?;
         }
 
         Ok(())
