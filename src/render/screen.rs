@@ -13,6 +13,7 @@ use std::io::{stdout, Stdout, Write};
 
 use crate::buffer::Buffer;
 use crate::editor::{Cursors, Position};
+use crate::fuss::VisibleItem;
 
 // Editor color scheme (256-color palette)
 const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
@@ -357,5 +358,285 @@ impl Screen {
             (line_count as f64).log10().floor() as usize + 1
         };
         digits.max(3) // Minimum 3 characters
+    }
+
+    /// Render the fuss mode sidebar
+    pub fn render_fuss(
+        &mut self,
+        items: &[VisibleItem],
+        selected: usize,
+        scroll: usize,
+        width: u16,
+        hints_expanded: bool,
+    ) -> Result<()> {
+        let width = width as usize;
+        let text_rows = self.rows.saturating_sub(1) as usize;
+        let hint_rows = if hints_expanded { 4 } else { 1 };
+        let tree_rows = text_rows.saturating_sub(hint_rows);
+
+        // Draw file tree
+        for row in 0..tree_rows {
+            execute!(self.stdout, MoveTo(0, row as u16))?;
+
+            let item_idx = scroll + row;
+            if item_idx < items.len() {
+                let item = &items[item_idx];
+                let is_selected = item_idx == selected;
+
+                // Build display line
+                let indent = "  ".repeat(item.depth.saturating_sub(1));
+                let icon = if item.is_dir {
+                    if item.expanded { "- " } else { "+ " }
+                } else {
+                    "  "
+                };
+                let suffix = if item.is_dir { "/" } else { "" };
+                let display = format!("{}{}{}{}", indent, icon, item.name, suffix);
+
+                // Truncate to width
+                let truncated: String = display.chars().take(width.saturating_sub(1)).collect();
+                let padded = format!("{:<width$}", truncated, width = width);
+
+                if is_selected {
+                    // Highlight selected
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::DarkGrey),
+                        SetForegroundColor(Color::White),
+                        Print(&padded),
+                        ResetColor
+                    )?;
+                } else if item.is_dir {
+                    // Directories in blue
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(BG_COLOR),
+                        SetForegroundColor(Color::Blue),
+                        Print(&padded),
+                        ResetColor
+                    )?;
+                } else {
+                    // Files in default color
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(BG_COLOR),
+                        SetForegroundColor(Color::Reset),
+                        Print(&padded),
+                        ResetColor
+                    )?;
+                }
+            } else {
+                // Empty row
+                let empty = " ".repeat(width);
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(BG_COLOR),
+                    Print(&empty),
+                    ResetColor
+                )?;
+            }
+        }
+
+        // Draw hints at bottom
+        let hint_start = tree_rows;
+        if hints_expanded {
+            let hints = [
+                "j/k:nav  spc:toggle  o:open  .:hidden",
+                "ctrl-b:close  ctrl-/:hints",
+                "",
+                "",
+            ];
+            for (i, hint) in hints.iter().enumerate() {
+                if hint_start + i < text_rows {
+                    execute!(self.stdout, MoveTo(0, (hint_start + i) as u16))?;
+                    let padded = format!("{:<width$}", hint, width = width);
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(BG_COLOR),
+                        SetForegroundColor(Color::DarkGrey),
+                        Print(&padded),
+                        ResetColor
+                    )?;
+                }
+            }
+        } else {
+            if hint_start < text_rows {
+                execute!(self.stdout, MoveTo(0, hint_start as u16))?;
+                let hint = "ctrl-/:hints";
+                let padded = format!("{:<width$}", hint, width = width);
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(BG_COLOR),
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(&padded),
+                    ResetColor
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Render the editor view with a horizontal offset (for fuss mode)
+    pub fn render_with_offset(
+        &mut self,
+        buffer: &Buffer,
+        cursors: &Cursors,
+        viewport_line: usize,
+        filename: Option<&str>,
+        message: Option<&str>,
+        bracket_match: Option<(usize, usize)>,
+        offset: u16,
+    ) -> Result<()> {
+        // Hide cursor during render to prevent flicker
+        execute!(self.stdout, Hide)?;
+
+        let available_cols = self.cols.saturating_sub(offset) as usize;
+        let line_num_width = self.line_number_width(buffer.line_count());
+        let text_cols = available_cols.saturating_sub(line_num_width + 1);
+
+        // Get primary cursor for current line highlighting
+        let primary = cursors.primary();
+
+        // Collect all selections from all cursors
+        let selections: Vec<(Position, Position)> = cursors.all()
+            .iter()
+            .filter_map(|c| c.selection_bounds())
+            .collect();
+
+        // Collect all cursor positions for rendering
+        let primary_idx = cursors.primary_index();
+        let cursor_positions: Vec<(usize, usize, bool)> = cursors.all()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.line, c.col, i == primary_idx))
+            .collect();
+
+        // Reserve 1 row for status bar
+        let text_rows = self.rows.saturating_sub(1) as usize;
+
+        // Draw text area
+        for row in 0..text_rows {
+            let line_idx = viewport_line + row;
+            let is_current_line = line_idx == primary.line;
+            execute!(self.stdout, MoveTo(offset, row as u16))?;
+
+            if line_idx < buffer.line_count() {
+                let line_num_fg = if is_current_line {
+                    CURRENT_LINE_NUM_COLOR
+                } else {
+                    LINE_NUM_COLOR
+                };
+                let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
+
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    SetForegroundColor(line_num_fg),
+                    Print(format!("{:>width$} ", line_idx + 1, width = line_num_width)),
+                )?;
+
+                if let Some(line) = buffer.line_str(line_idx) {
+                    let bracket_col = bracket_match
+                        .filter(|(bl, _)| *bl == line_idx)
+                        .map(|(_, bc)| bc);
+
+                    let secondary_cursors: Vec<usize> = cursor_positions.iter()
+                        .filter(|(l, _, is_primary)| *l == line_idx && !*is_primary)
+                        .map(|(_, c, _)| *c)
+                        .collect();
+
+                    self.render_line_with_cursors(
+                        &line,
+                        line_idx,
+                        text_cols,
+                        &selections,
+                        is_current_line,
+                        bracket_col,
+                        &secondary_cursors,
+                    )?;
+                }
+
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    Clear(ClearType::UntilNewLine),
+                    ResetColor
+                )?;
+            } else {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(BG_COLOR),
+                    SetForegroundColor(Color::DarkBlue),
+                    Print(format!("{:>width$} ", "~", width = line_num_width)),
+                    Clear(ClearType::UntilNewLine),
+                    ResetColor
+                )?;
+            }
+        }
+
+        // Status bar
+        self.render_status_bar_with_offset(buffer, cursors, filename, message, offset)?;
+
+        // Position hardware cursor at primary cursor
+        let cursor_row = primary.line.saturating_sub(viewport_line);
+        let cursor_col = offset as usize + line_num_width + 1 + primary.col;
+        execute!(
+            self.stdout,
+            MoveTo(cursor_col as u16, cursor_row as u16),
+            Show
+        )?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    fn render_status_bar_with_offset(
+        &mut self,
+        buffer: &Buffer,
+        cursors: &Cursors,
+        filename: Option<&str>,
+        message: Option<&str>,
+        offset: u16,
+    ) -> Result<()> {
+        let status_row = self.rows.saturating_sub(1);
+        let available_cols = self.cols.saturating_sub(offset) as usize;
+        execute!(self.stdout, MoveTo(offset, status_row))?;
+
+        execute!(
+            self.stdout,
+            SetBackgroundColor(Color::DarkGrey),
+            SetForegroundColor(Color::White)
+        )?;
+
+        let name = filename.unwrap_or("[No Name]");
+        let modified = if buffer.modified { " [+]" } else { "" };
+        let cursor_count = if cursors.len() > 1 {
+            format!(" ({} cursors)", cursors.len())
+        } else {
+            String::new()
+        };
+        let left = format!(" {}{}{}", name, modified, cursor_count);
+
+        let primary = cursors.primary();
+        let pos = format!("Ln {}, Col {}", primary.line + 1, primary.col + 1);
+        let right = if let Some(msg) = message {
+            format!(" {} | {} ", msg, pos)
+        } else {
+            format!(" {} ", pos)
+        };
+
+        let padding = available_cols.saturating_sub(left.len() + right.len());
+        let middle = " ".repeat(padding);
+
+        execute!(
+            self.stdout,
+            Print(&left),
+            Print(&middle),
+            Print(&right),
+            ResetColor
+        )?;
+
+        Ok(())
     }
 }

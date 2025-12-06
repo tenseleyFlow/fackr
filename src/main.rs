@@ -1,5 +1,6 @@
 mod buffer;
 mod editor;
+mod fuss;
 mod input;
 mod render;
 mod util;

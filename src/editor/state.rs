@@ -1,10 +1,11 @@
 use anyhow::Result;
 use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyEvent, MouseEvent};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::buffer::Buffer;
+use crate::fuss::FussMode;
 use crate::input::{Key, Modifiers, Mouse, Button};
 use crate::render::Screen;
 
@@ -26,6 +27,10 @@ pub struct Editor {
     message: Option<String>,
     /// Escape key timeout in milliseconds (for Alt key detection)
     escape_time: u64,
+    /// Fuss mode (file tree sidebar)
+    fuss: FussMode,
+    /// Workspace root directory
+    workspace_root: PathBuf,
 }
 
 impl Editor {
@@ -43,6 +48,9 @@ impl Editor {
         // Try to initialize system clipboard, fall back to internal if unavailable
         let clipboard = Clipboard::new().ok();
 
+        // Default workspace root is current directory
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
         Ok(Self {
             buffer: Buffer::new(),
             cursors: Cursors::new(),
@@ -55,15 +63,24 @@ impl Editor {
             internal_clipboard: String::new(),
             message: None,
             escape_time,
+            fuss: FussMode::new(),
+            workspace_root,
         })
     }
 
     pub fn open(&mut self, path: &str) -> Result<()> {
         self.buffer = Buffer::load(path)?;
-        self.filename = Some(PathBuf::from(path));
+        let file_path = PathBuf::from(path);
+        self.filename = Some(file_path.clone());
         self.cursors = Cursors::new();
         self.viewport_line = 0;
         self.history = History::new();
+
+        // Set workspace root to the file's directory
+        if let Some(parent) = file_path.canonicalize().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())) {
+            self.workspace_root = parent;
+        }
+
         Ok(())
     }
 
@@ -247,19 +264,55 @@ impl Editor {
         let cursor = self.cursors.primary();
         let bracket_match = self.buffer.find_matching_bracket(cursor.line, cursor.col);
 
-        self.screen.render(
+        // Calculate fuss pane width if active
+        let fuss_width = if self.fuss.active {
+            self.fuss.width(self.screen.cols)
+        } else {
+            0
+        };
+
+        // Render fuss mode sidebar if active
+        if self.fuss.active {
+            let visible_rows = self.screen.rows.saturating_sub(2) as usize;
+            self.fuss.update_viewport(visible_rows);
+
+            if let Some(ref tree) = self.fuss.tree {
+                self.screen.render_fuss(
+                    tree.visible_items(),
+                    self.fuss.selected,
+                    self.fuss.scroll,
+                    fuss_width,
+                    self.fuss.hints_expanded,
+                )?;
+            }
+        }
+
+        // Render main editor (offset by fuss width if active)
+        self.screen.render_with_offset(
             &self.buffer,
             &self.cursors,
             self.viewport_line,
             self.filename.as_ref().and_then(|p| p.to_str()),
             self.message.as_deref(),
             bracket_match,
+            fuss_width,
         )
     }
 
     fn handle_key_with_mods(&mut self, key: Key, mods: Modifiers) -> Result<()> {
         // Clear message on any key
         self.message = None;
+
+        // Toggle fuss mode: Ctrl+B (works in both modes)
+        if matches!((&key, &mods), (Key::Char('b'), Modifiers { ctrl: true, .. })) {
+            self.toggle_fuss_mode();
+            return Ok(());
+        }
+
+        // Route to fuss mode handler if active
+        if self.fuss.active {
+            return self.handle_fuss_key(key, mods);
+        }
 
         // Break undo group on any non-character key (movement, commands, etc.)
         // This ensures each "typing session" is its own undo unit
@@ -1714,6 +1767,82 @@ impl Editor {
             self.buffer.save(path)?;
             self.message = Some("Saved".to_string());
         }
+        Ok(())
+    }
+
+    // === Fuss mode (file tree) ===
+
+    fn toggle_fuss_mode(&mut self) {
+        if !self.fuss.active {
+            self.fuss.activate(&self.workspace_root);
+        } else {
+            self.fuss.deactivate();
+        }
+    }
+
+    fn handle_fuss_key(&mut self, key: Key, mods: Modifiers) -> Result<()> {
+        match (&key, &mods) {
+            // Quit: Ctrl+Q (still works in fuss mode)
+            (Key::Char('q'), Modifiers { ctrl: true, .. }) => {
+                self.running = false;
+            }
+
+            // Exit fuss mode
+            (Key::Escape, _) => {
+                self.fuss.deactivate();
+            }
+
+            // Navigation
+            (Key::Up, _) | (Key::Char('k'), Modifiers { ctrl: false, alt: false, .. }) => {
+                self.fuss.move_up();
+            }
+            (Key::Down, _) | (Key::Char('j'), Modifiers { ctrl: false, alt: false, .. }) => {
+                self.fuss.move_down();
+            }
+
+            // Toggle expand/collapse directory
+            (Key::Char(' '), _) => {
+                self.fuss.toggle_expand();
+            }
+
+            // Expand directory (right arrow)
+            (Key::Right, _) => {
+                if self.fuss.is_dir_selected() {
+                    self.fuss.toggle_expand();
+                }
+            }
+
+            // Open file or toggle directory
+            (Key::Enter, _) | (Key::Char('o'), Modifiers { ctrl: false, alt: false, .. }) => {
+                if self.fuss.is_dir_selected() {
+                    self.fuss.toggle_expand();
+                } else if let Some(path) = self.fuss.selected_file() {
+                    self.open_file(&path)?;
+                    self.fuss.deactivate();
+                }
+            }
+
+            // Toggle hidden files
+            (Key::Char('.'), _) => {
+                self.fuss.toggle_hidden();
+            }
+
+            // Toggle hints
+            (Key::Char('/'), Modifiers { ctrl: true, .. }) => {
+                self.fuss.toggle_hints();
+            }
+
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn open_file(&mut self, path: &Path) -> Result<()> {
+        self.buffer = Buffer::load(path)?;
+        self.filename = Some(path.to_path_buf());
+        self.cursors = Cursors::new();
+        self.viewport_line = 0;
+        self.history = History::new();
         Ok(())
     }
 }
