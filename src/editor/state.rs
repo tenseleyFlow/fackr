@@ -722,7 +722,65 @@ impl Editor {
     }
 
     fn insert_char(&mut self, c: char) {
+        // Check for auto-pair closing: if typing a closing bracket/quote
+        // and the next char is the same, just move cursor right
+        if let Some(next_char) = self.char_at_cursor() {
+            if c == next_char && (c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '`') {
+                self.cursor.col += 1;
+                self.cursor.desired_col = self.cursor.col;
+                return;
+            }
+        }
+
+        // Check for auto-pair opening: insert pair and place cursor between
+        let pair = match c {
+            '(' => Some(')'),
+            '[' => Some(']'),
+            '{' => Some('}'),
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '`' => Some('`'),
+            _ => None,
+        };
+
+        if let Some(close) = pair {
+            // For quotes, only auto-pair if not inside a word
+            let should_pair = if c == '"' || c == '\'' || c == '`' {
+                // Don't auto-pair if previous char is alphanumeric (e.g., typing apostrophe in "don't")
+                let prev_char = if self.cursor.col > 0 {
+                    let idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
+                    self.buffer.char_at(idx.saturating_sub(1))
+                } else {
+                    None
+                };
+                !prev_char.map_or(false, |ch| ch.is_alphanumeric())
+            } else {
+                true
+            };
+
+            if should_pair {
+                self.delete_selection();
+                let cursor_before = self.cursor_pos();
+                let idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
+                let pair_str = format!("{}{}", c, close);
+
+                self.buffer.insert(idx, &pair_str);
+                self.cursor.col += 1; // Position cursor between the pair
+                self.cursor.desired_col = self.cursor.col;
+
+                let cursor_after = self.cursor_pos();
+                self.history.record_insert(idx, pair_str, cursor_before, cursor_after);
+                return;
+            }
+        }
+
         self.insert_text(&c.to_string());
+    }
+
+    /// Get character at cursor position (if any)
+    fn char_at_cursor(&self) -> Option<char> {
+        let idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
+        self.buffer.char_at(idx)
     }
 
     fn insert_newline(&mut self) {
@@ -770,14 +828,40 @@ impl Editor {
         if self.cursor.col > 0 {
             let cursor_before = self.cursor_pos();
             let idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
-            let deleted = self.buffer.char_at(idx - 1).map(|c| c.to_string()).unwrap_or_default();
+            let prev_char = self.buffer.char_at(idx - 1);
+            let next_char = self.buffer.char_at(idx);
 
-            self.buffer.delete(idx - 1, idx);
-            self.cursor.col -= 1;
-            self.cursor.desired_col = self.cursor.col;
+            // Check for auto-pair deletion: if deleting opening bracket/quote
+            // and next char is the matching close, delete both
+            let is_pair = match (prev_char, next_char) {
+                (Some('('), Some(')')) => true,
+                (Some('['), Some(']')) => true,
+                (Some('{'), Some('}')) => true,
+                (Some('"'), Some('"')) => true,
+                (Some('\''), Some('\'')) => true,
+                (Some('`'), Some('`')) => true,
+                _ => false,
+            };
 
-            let cursor_after = self.cursor_pos();
-            self.history.record_delete(idx - 1, deleted, cursor_before, cursor_after);
+            if is_pair {
+                // Delete both characters
+                let deleted = format!("{}{}", prev_char.unwrap(), next_char.unwrap());
+                self.buffer.delete(idx - 1, idx + 1);
+                self.cursor.col -= 1;
+                self.cursor.desired_col = self.cursor.col;
+
+                let cursor_after = self.cursor_pos();
+                self.history.record_delete(idx - 1, deleted, cursor_before, cursor_after);
+            } else {
+                let deleted = prev_char.map(|c| c.to_string()).unwrap_or_default();
+
+                self.buffer.delete(idx - 1, idx);
+                self.cursor.col -= 1;
+                self.cursor.desired_col = self.cursor.col;
+
+                let cursor_after = self.cursor_pos();
+                self.history.record_delete(idx - 1, deleted, cursor_before, cursor_after);
+            }
         } else if self.cursor.line > 0 {
             let cursor_before = self.cursor_pos();
             let prev_line_len = self.buffer.line_len(self.cursor.line - 1);
