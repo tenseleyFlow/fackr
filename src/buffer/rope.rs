@@ -147,6 +147,11 @@ impl Buffer {
         self.text.len_chars() == 0
     }
 
+    /// Get total character count
+    pub fn len_chars(&self) -> usize {
+        self.text.len_chars()
+    }
+
     /// Get rope slice for a range
     #[allow(dead_code)]
     pub fn slice(&self, start: usize, end: usize) -> ropey::RopeSlice<'_> {
@@ -191,6 +196,79 @@ impl Buffer {
             pos += direction;
         }
 
+        None
+    }
+
+    /// Find surrounding brackets containing the cursor position (across lines)
+    /// Returns (open_char_idx, close_char_idx, open_char, close_char)
+    pub fn find_surrounding_brackets(&self, line: usize, col: usize) -> Option<(usize, usize, char, char)> {
+        let cursor_idx = self.line_col_to_char(line, col);
+
+        // Search backward for an opening bracket that contains cursor
+        for search_pos in (0..cursor_idx).rev() {
+            let ch = self.char_at(search_pos)?;
+            let (open, close) = match ch {
+                '(' => ('(', ')'),
+                '{' => ('{', '}'),
+                '[' => ('[', ']'),
+                _ => continue,
+            };
+
+            // Find matching close
+            let mut depth = 1;
+            let mut pos = search_pos + 1;
+            let len = self.text.len_chars();
+
+            while pos < len {
+                if let Some(c) = self.char_at(pos) {
+                    if c == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            // Check if cursor is inside this pair
+                            if cursor_idx > search_pos && cursor_idx <= pos {
+                                return Some((search_pos, pos, open, close));
+                            }
+                            break;
+                        }
+                    } else if c == open {
+                        depth += 1;
+                    }
+                }
+                pos += 1;
+            }
+        }
+        None
+    }
+
+    /// Find surrounding quotes containing the cursor position (across lines)
+    /// Returns (open_char_idx, close_char_idx, quote_char)
+    pub fn find_surrounding_quotes(&self, line: usize, col: usize) -> Option<(usize, usize, char)> {
+        let cursor_idx = self.line_col_to_char(line, col);
+
+        // Search backward for an opening quote
+        for search_pos in (0..cursor_idx).rev() {
+            let ch = self.char_at(search_pos)?;
+            if ch != '"' && ch != '\'' && ch != '`' {
+                continue;
+            }
+
+            // Find matching close (same quote char)
+            let mut pos = search_pos + 1;
+            let len = self.text.len_chars();
+
+            while pos < len {
+                if let Some(c) = self.char_at(pos) {
+                    if c == ch {
+                        // Check if cursor is inside this pair
+                        if cursor_idx > search_pos && cursor_idx <= pos {
+                            return Some((search_pos, pos, ch));
+                        }
+                        break;
+                    }
+                }
+                pos += 1;
+            }
+        }
         None
     }
 }

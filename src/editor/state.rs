@@ -496,76 +496,63 @@ impl Editor {
     // === Bracket/Quote Operations ===
 
     fn jump_to_matching_bracket(&mut self) {
+        // First check if cursor is on a bracket
         if let Some((line, col)) = self.buffer.find_matching_bracket(self.cursor.line, self.cursor.col) {
             self.cursor.clear_selection();
             self.cursor.line = line;
             self.cursor.col = col;
             self.cursor.desired_col = col;
+            return;
+        }
+
+        // If not on a bracket, find surrounding brackets and jump to opening
+        if let Some((open_idx, close_idx, _, _)) = self.buffer.find_surrounding_brackets(self.cursor.line, self.cursor.col) {
+            let cursor_idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
+            // Jump to whichever bracket we're not at
+            let (target_line, target_col) = if cursor_idx == open_idx + 1 {
+                self.buffer.char_to_line_col(close_idx)
+            } else {
+                self.buffer.char_to_line_col(open_idx)
+            };
+            self.cursor.clear_selection();
+            self.cursor.line = target_line;
+            self.cursor.col = target_col;
+            self.cursor.desired_col = target_col;
         }
     }
 
     fn cycle_quotes(&mut self) {
-        // Find surrounding quotes and cycle: " -> ' -> ` -> "
-        if let Some(line_str) = self.buffer.line_str(self.cursor.line) {
-            let chars: Vec<char> = line_str.chars().collect();
-            let col = self.cursor.col;
+        // Find surrounding quotes (across lines) and cycle: " -> ' -> ` -> "
+        if let Some((open_idx, close_idx, quote_char)) = self.buffer.find_surrounding_quotes(self.cursor.line, self.cursor.col) {
+            let new_quote = match quote_char {
+                '"' => '\'',
+                '\'' => '`',
+                '`' => '"',
+                _ => return,
+            };
 
-            // Find opening quote (searching backward)
-            let mut start = None;
-            let mut quote_char = ' ';
-            for i in (0..col).rev() {
-                let c = chars[i];
-                if c == '"' || c == '\'' || c == '`' {
-                    start = Some(i);
-                    quote_char = c;
-                    break;
-                }
-            }
+            let cursor_before = self.cursor_pos();
+            self.history.begin_group();
 
-            if let Some(start_col) = start {
-                // Find closing quote (searching forward)
-                let mut end = None;
-                for i in (col.max(start_col + 1))..chars.len() {
-                    if chars[i] == quote_char {
-                        end = Some(i);
-                        break;
-                    }
-                }
+            // Replace closing quote first (to maintain positions)
+            self.buffer.delete(close_idx, close_idx + 1);
+            self.buffer.insert(close_idx, &new_quote.to_string());
+            self.history.record_delete(close_idx, quote_char.to_string(), cursor_before, cursor_before);
+            self.history.record_insert(close_idx, new_quote.to_string(), cursor_before, cursor_before);
 
-                if let Some(end_col) = end {
-                    let new_quote = match quote_char {
-                        '"' => '\'',
-                        '\'' => '`',
-                        '`' => '"',
-                        _ => return,
-                    };
+            // Replace opening quote
+            self.buffer.delete(open_idx, open_idx + 1);
+            self.buffer.insert(open_idx, &new_quote.to_string());
+            self.history.record_delete(open_idx, quote_char.to_string(), cursor_before, cursor_before);
+            self.history.record_insert(open_idx, new_quote.to_string(), cursor_before, cursor_before);
 
-                    let cursor_before = self.cursor_pos();
-                    self.history.begin_group();
-
-                    // Replace closing quote first (to maintain positions)
-                    let end_idx = self.buffer.line_col_to_char(self.cursor.line, end_col);
-                    self.buffer.delete(end_idx, end_idx + 1);
-                    self.buffer.insert(end_idx, &new_quote.to_string());
-                    self.history.record_delete(end_idx, quote_char.to_string(), cursor_before, cursor_before);
-                    self.history.record_insert(end_idx, new_quote.to_string(), cursor_before, cursor_before);
-
-                    // Replace opening quote
-                    let start_idx = self.buffer.line_col_to_char(self.cursor.line, start_col);
-                    self.buffer.delete(start_idx, start_idx + 1);
-                    self.buffer.insert(start_idx, &new_quote.to_string());
-                    self.history.record_delete(start_idx, quote_char.to_string(), cursor_before, cursor_before);
-                    self.history.record_insert(start_idx, new_quote.to_string(), cursor_before, cursor_before);
-
-                    self.history.end_group();
-                }
-            }
+            self.history.end_group();
         }
     }
 
     fn cycle_brackets(&mut self) {
-        // Find surrounding brackets and cycle: ( -> { -> [ -> (
-        if let Some((start_col, end_col, open, _close)) = self.find_surrounding_brackets() {
+        // Find surrounding brackets (across lines) and cycle: ( -> { -> [ -> (
+        if let Some((open_idx, close_idx, open, close)) = self.buffer.find_surrounding_brackets(self.cursor.line, self.cursor.col) {
             let (new_open, new_close) = match open {
                 '(' => ('{', '}'),
                 '{' => ('[', ']'),
@@ -577,172 +564,100 @@ impl Editor {
             self.history.begin_group();
 
             // Replace closing bracket first
-            let end_idx = self.buffer.line_col_to_char(self.cursor.line, end_col);
-            self.buffer.delete(end_idx, end_idx + 1);
-            self.buffer.insert(end_idx, &new_close.to_string());
-            self.history.record_delete(end_idx, _close.to_string(), cursor_before, cursor_before);
-            self.history.record_insert(end_idx, new_close.to_string(), cursor_before, cursor_before);
+            self.buffer.delete(close_idx, close_idx + 1);
+            self.buffer.insert(close_idx, &new_close.to_string());
+            self.history.record_delete(close_idx, close.to_string(), cursor_before, cursor_before);
+            self.history.record_insert(close_idx, new_close.to_string(), cursor_before, cursor_before);
 
             // Replace opening bracket
-            let start_idx = self.buffer.line_col_to_char(self.cursor.line, start_col);
-            self.buffer.delete(start_idx, start_idx + 1);
-            self.buffer.insert(start_idx, &new_open.to_string());
-            self.history.record_delete(start_idx, open.to_string(), cursor_before, cursor_before);
-            self.history.record_insert(start_idx, new_open.to_string(), cursor_before, cursor_before);
+            self.buffer.delete(open_idx, open_idx + 1);
+            self.buffer.insert(open_idx, &new_open.to_string());
+            self.history.record_delete(open_idx, open.to_string(), cursor_before, cursor_before);
+            self.history.record_insert(open_idx, new_open.to_string(), cursor_before, cursor_before);
 
             self.history.end_group();
         }
     }
 
     fn remove_surrounding(&mut self) {
-        // Remove surrounding quotes OR brackets (whichever is closest)
-        if let Some(line_str) = self.buffer.line_str(self.cursor.line) {
-            let chars: Vec<char> = line_str.chars().collect();
-            let col = self.cursor.col;
+        // Remove surrounding quotes OR brackets (whichever is innermost/closest)
+        let cursor_idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
 
-            // Find closest opening delimiter (quote or bracket)
-            let mut best_start: Option<(usize, char, char)> = None; // (col, open, close)
+        // Find both surrounding quotes and brackets
+        let quotes = self.buffer.find_surrounding_quotes(self.cursor.line, self.cursor.col);
+        let brackets = self.buffer.find_surrounding_brackets(self.cursor.line, self.cursor.col);
 
-            for i in (0..col).rev() {
-                let c = chars[i];
-                let pair = match c {
-                    '"' => Some(('"', '"')),
-                    '\'' => Some(('\'', '\'')),
-                    '`' => Some(('`', '`')),
-                    '(' => Some(('(', ')')),
-                    '{' => Some(('{', '}')),
-                    '[' => Some(('[', ']')),
-                    _ => None,
-                };
-                if let Some((open, close)) = pair {
-                    // Find matching close
-                    let search_start = if open == close { col.max(i + 1) } else { i + 1 };
-                    let mut depth = 1;
-                    for j in search_start..chars.len() {
-                        if chars[j] == close {
-                            if open == close || depth == 1 {
-                                best_start = Some((i, open, close));
-                                break;
-                            }
-                            depth -= 1;
-                        } else if chars[j] == open && open != close {
-                            depth += 1;
-                        }
-                    }
-                    if best_start.is_some() {
-                        break;
-                    }
-                }
+        // Pick whichever has the closer opening (innermost)
+        let (open_idx, close_idx, open_char, close_char) = match (quotes, brackets) {
+            (Some((qo, qc, qch)), Some((bo, bc, bop, bcl))) => {
+                if qo > bo { (qo, qc, qch, qch) } else { (bo, bc, bop, bcl) }
             }
+            (Some((qo, qc, qch)), None) => (qo, qc, qch, qch),
+            (None, Some((bo, bc, bop, bcl))) => (bo, bc, bop, bcl),
+            (None, None) => return,
+        };
 
-            if let Some((start_col, open, close)) = best_start {
-                // Find the matching close
-                let search_start = if open == close { col.max(start_col + 1) } else { start_col + 1 };
-                let mut depth = 1;
-                let mut end_col = None;
-                for j in search_start..chars.len() {
-                    if chars[j] == close {
-                        if open == close || depth == 1 {
-                            end_col = Some(j);
-                            break;
-                        }
-                        depth -= 1;
-                    } else if chars[j] == open && open != close {
-                        depth += 1;
-                    }
-                }
+        let cursor_before = self.cursor_pos();
+        self.history.begin_group();
 
-                if let Some(end) = end_col {
-                    let cursor_before = self.cursor_pos();
-                    self.history.begin_group();
+        // Delete closing first (to maintain open position)
+        self.buffer.delete(close_idx, close_idx + 1);
+        self.history.record_delete(close_idx, close_char.to_string(), cursor_before, cursor_before);
 
-                    // Delete closing first
-                    let end_idx = self.buffer.line_col_to_char(self.cursor.line, end);
-                    self.buffer.delete(end_idx, end_idx + 1);
-                    self.history.record_delete(end_idx, close.to_string(), cursor_before, cursor_before);
+        // Delete opening
+        self.buffer.delete(open_idx, open_idx + 1);
+        self.history.record_delete(open_idx, open_char.to_string(), cursor_before, cursor_before);
 
-                    // Delete opening
-                    let start_idx = self.buffer.line_col_to_char(self.cursor.line, start_col);
-                    self.buffer.delete(start_idx, start_idx + 1);
-                    self.history.record_delete(start_idx, open.to_string(), cursor_before, cursor_before);
-
-                    // Adjust cursor if needed
-                    if self.cursor.col > start_col {
-                        self.cursor.col -= 1;
-                    }
-                    if self.cursor.col > end - 1 {
-                        self.cursor.col -= 1;
-                    }
-                    self.cursor.desired_col = self.cursor.col;
-
-                    self.history.end_group();
-                }
-            }
+        // Adjust cursor position
+        if cursor_idx > open_idx {
+            self.cursor.col = self.cursor.col.saturating_sub(1);
         }
+        // Recalculate line/col after deletions
+        let new_cursor_idx = if cursor_idx > close_idx {
+            cursor_idx - 2
+        } else if cursor_idx > open_idx {
+            cursor_idx - 1
+        } else {
+            cursor_idx
+        };
+        let (new_line, new_col) = self.buffer.char_to_line_col(new_cursor_idx.min(self.buffer.len_chars().saturating_sub(1)));
+        self.cursor.line = new_line;
+        self.cursor.col = new_col;
+        self.cursor.desired_col = new_col;
+
+        self.history.end_group();
     }
 
     fn remove_surrounding_brackets(&mut self) {
         // Remove only surrounding brackets (not quotes)
-        if let Some((start_col, end_col, open, close)) = self.find_surrounding_brackets() {
+        if let Some((open_idx, close_idx, open, close)) = self.buffer.find_surrounding_brackets(self.cursor.line, self.cursor.col) {
+            let cursor_idx = self.buffer.line_col_to_char(self.cursor.line, self.cursor.col);
             let cursor_before = self.cursor_pos();
             self.history.begin_group();
 
             // Delete closing first
-            let end_idx = self.buffer.line_col_to_char(self.cursor.line, end_col);
-            self.buffer.delete(end_idx, end_idx + 1);
-            self.history.record_delete(end_idx, close.to_string(), cursor_before, cursor_before);
+            self.buffer.delete(close_idx, close_idx + 1);
+            self.history.record_delete(close_idx, close.to_string(), cursor_before, cursor_before);
 
             // Delete opening
-            let start_idx = self.buffer.line_col_to_char(self.cursor.line, start_col);
-            self.buffer.delete(start_idx, start_idx + 1);
-            self.history.record_delete(start_idx, open.to_string(), cursor_before, cursor_before);
+            self.buffer.delete(open_idx, open_idx + 1);
+            self.history.record_delete(open_idx, open.to_string(), cursor_before, cursor_before);
 
-            // Adjust cursor
-            if self.cursor.col > start_col {
-                self.cursor.col -= 1;
-            }
-            if self.cursor.col > end_col - 1 {
-                self.cursor.col -= 1;
-            }
-            self.cursor.desired_col = self.cursor.col;
+            // Recalculate cursor position after deletions
+            let new_cursor_idx = if cursor_idx > close_idx {
+                cursor_idx - 2
+            } else if cursor_idx > open_idx {
+                cursor_idx - 1
+            } else {
+                cursor_idx
+            };
+            let (new_line, new_col) = self.buffer.char_to_line_col(new_cursor_idx.min(self.buffer.len_chars().saturating_sub(1)));
+            self.cursor.line = new_line;
+            self.cursor.col = new_col;
+            self.cursor.desired_col = new_col;
 
             self.history.end_group();
         }
-    }
-
-    /// Find surrounding brackets (not quotes) - returns (start_col, end_col, open_char, close_char)
-    fn find_surrounding_brackets(&self) -> Option<(usize, usize, char, char)> {
-        let line_str = self.buffer.line_str(self.cursor.line)?;
-        let chars: Vec<char> = line_str.chars().collect();
-        let col = self.cursor.col;
-
-        // Search backward for opening bracket
-        for i in (0..col).rev() {
-            let (open, close) = match chars[i] {
-                '(' => ('(', ')'),
-                '{' => ('{', '}'),
-                '[' => ('[', ']'),
-                _ => continue,
-            };
-
-            // Find matching close
-            let mut depth = 1;
-            for j in (i + 1)..chars.len() {
-                if chars[j] == close {
-                    depth -= 1;
-                    if depth == 0 {
-                        // Check cursor is inside
-                        if col > i && col <= j {
-                            return Some((i, j, open, close));
-                        }
-                        break;
-                    }
-                } else if chars[j] == open {
-                    depth += 1;
-                }
-            }
-        }
-        None
     }
 
     // === Editing ===
