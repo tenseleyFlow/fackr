@@ -3,6 +3,7 @@ mod editor;
 mod input;
 mod render;
 mod util;
+mod workspace;
 
 use anyhow::Result;
 use editor::Editor;
