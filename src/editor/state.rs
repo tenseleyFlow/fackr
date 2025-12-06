@@ -55,9 +55,18 @@ impl Editor {
             self.screen.refresh_size()?;
             self.render()?;
 
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(key_event) = event::read()? {
-                    self.handle_key(key_event)?;
+            // Process all available events before rendering again
+            // Use a short timeout to remain responsive
+            if event::poll(Duration::from_millis(16))? {
+                // Process all queued events
+                loop {
+                    if let Event::Key(key_event) = event::read()? {
+                        self.handle_key(key_event)?;
+                    }
+                    // Check if more events are immediately available
+                    if !event::poll(Duration::from_millis(0))? {
+                        break;
+                    }
                 }
             }
         }
@@ -128,6 +137,9 @@ impl Editor {
             // Word movement: Alt+Left/Right
             (Key::Left, Modifiers { alt: true, shift, .. }) => self.move_word_left(*shift),
             (Key::Right, Modifiers { alt: true, shift, .. }) => self.move_word_right(*shift),
+            // Unix-style word movement: Alt+B (back), Alt+F (forward)
+            (Key::Char('b'), Modifiers { alt: true, .. }) => self.move_word_left(false),
+            (Key::Char('f'), Modifiers { alt: true, .. }) => self.move_word_right(false),
 
             // === Movement with selection ===
             (Key::Up, Modifiers { shift, .. }) => self.move_up(*shift),
@@ -153,6 +165,7 @@ impl Editor {
                 self.insert_char(*c);
             }
             (Key::Enter, _) => self.insert_newline(),
+            (Key::Backspace, Modifiers { alt: true, .. }) => self.delete_word_backward(),
             (Key::Backspace, _) | (Key::Char('h'), Modifiers { ctrl: true, .. }) => {
                 self.delete_backward();
             }
@@ -160,7 +173,7 @@ impl Editor {
             (Key::Tab, Modifiers { shift: false, .. }) => self.insert_tab(),
             (Key::Tab, Modifiers { shift: true, .. }) => self.dedent(),
 
-            // Delete word backward: Ctrl+W or Alt+Backspace
+            // Delete word backward: Ctrl+W
             (Key::Char('w'), Modifiers { ctrl: true, .. }) => self.delete_word_backward(),
             // Delete word forward: Alt+D
             (Key::Char('d'), Modifiers { alt: true, .. }) => self.delete_word_forward(),

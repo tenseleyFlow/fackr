@@ -61,6 +61,9 @@ impl Screen {
         filename: Option<&str>,
         message: Option<&str>,
     ) -> Result<()> {
+        // Hide cursor during render to prevent flicker
+        execute!(self.stdout, Hide)?;
+
         let line_num_width = self.line_number_width(buffer.line_count());
         let text_cols = self.cols as usize - line_num_width - 1;
 
