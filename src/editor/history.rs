@@ -39,11 +39,19 @@ impl Operation {
 #[derive(Debug, Clone, Default)]
 pub struct OperationGroup {
     pub ops: Vec<Operation>,
+    /// Cursor positions before this group (for multi-cursor undo)
+    pub cursors_before: Vec<Position>,
+    /// Cursor positions after this group (for multi-cursor redo)
+    pub cursors_after: Vec<Position>,
 }
 
 impl OperationGroup {
     pub fn new() -> Self {
-        Self { ops: Vec::new() }
+        Self {
+            ops: Vec::new(),
+            cursors_before: Vec::new(),
+            cursors_after: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, op: Operation) {
@@ -52,6 +60,16 @@ impl OperationGroup {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    pub fn set_cursors_before(&mut self, positions: Vec<Position>) {
+        if self.cursors_before.is_empty() {
+            self.cursors_before = positions;
+        }
+    }
+
+    pub fn set_cursors_after(&mut self, positions: Vec<Position>) {
+        self.cursors_after = positions;
     }
 }
 
@@ -91,6 +109,16 @@ impl History {
         self.current_group.push(op);
         // Clear redo stack when new operations are added
         self.redo_stack.clear();
+    }
+
+    /// Set cursor positions before current operation group (for multi-cursor undo)
+    pub fn set_cursors_before(&mut self, positions: Vec<Position>) {
+        self.current_group.set_cursors_before(positions);
+    }
+
+    /// Set cursor positions after current operation group (for multi-cursor redo)
+    pub fn set_cursors_after(&mut self, positions: Vec<Position>) {
+        self.current_group.set_cursors_after(positions);
     }
 
     /// Record an insert operation
@@ -140,25 +168,35 @@ impl History {
         }
     }
 
-    /// Get operations to undo, returns (operations, cursor_position_after_undo)
-    pub fn undo(&mut self) -> Option<(Vec<Operation>, Position)> {
+    /// Get operations to undo, returns (operations, cursor_positions_after_undo)
+    pub fn undo(&mut self) -> Option<(Vec<Operation>, Vec<Position>)> {
         self.commit_group();
 
         if let Some(group) = self.undo_stack.pop() {
-            let cursor_pos = group.ops.first().map(|op| op.cursor_before()).unwrap_or_default();
+            // Use stored cursors_before if available, otherwise fall back to first op's cursor_before
+            let cursor_positions = if !group.cursors_before.is_empty() {
+                group.cursors_before.clone()
+            } else {
+                vec![group.ops.first().map(|op| op.cursor_before()).unwrap_or_default()]
+            };
             self.redo_stack.push(group.clone());
-            Some((group.ops, cursor_pos))
+            Some((group.ops, cursor_positions))
         } else {
             None
         }
     }
 
-    /// Get operations to redo, returns (operations, cursor_position_after_redo)
-    pub fn redo(&mut self) -> Option<(Vec<Operation>, Position)> {
+    /// Get operations to redo, returns (operations, cursor_positions_after_redo)
+    pub fn redo(&mut self) -> Option<(Vec<Operation>, Vec<Position>)> {
         if let Some(group) = self.redo_stack.pop() {
-            let cursor_pos = group.ops.last().map(|op| op.cursor_after()).unwrap_or_default();
+            // Use stored cursors_after if available, otherwise fall back to last op's cursor_after
+            let cursor_positions = if !group.cursors_after.is_empty() {
+                group.cursors_after.clone()
+            } else {
+                vec![group.ops.last().map(|op| op.cursor_after()).unwrap_or_default()]
+            };
             self.undo_stack.push(group.clone());
-            Some((group.ops, cursor_pos))
+            Some((group.ops, cursor_positions))
         } else {
             None
         }
@@ -206,9 +244,10 @@ mod tests {
         history.end_group();
 
         assert!(history.can_undo());
-        let (ops, pos) = history.undo().unwrap();
+        let (ops, positions) = history.undo().unwrap();
         assert_eq!(ops.len(), 1);
-        assert_eq!(pos, before);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], before);
     }
 
     #[test]
@@ -223,8 +262,9 @@ mod tests {
         history.undo();
         assert!(history.can_redo());
 
-        let (ops, pos) = history.redo().unwrap();
+        let (ops, positions) = history.redo().unwrap();
         assert_eq!(ops.len(), 1);
-        assert_eq!(pos, after);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], after);
     }
 }
