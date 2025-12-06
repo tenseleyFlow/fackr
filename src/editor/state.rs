@@ -303,8 +303,8 @@ impl Editor {
         // Clear message on any key
         self.message = None;
 
-        // Toggle fuss mode: Ctrl+B (works in both modes)
-        if matches!((&key, &mods), (Key::Char('b'), Modifiers { ctrl: true, .. })) {
+        // Toggle fuss mode: Ctrl+B or F3 (works in both modes)
+        if matches!((&key, &mods), (Key::Char('b'), Modifiers { ctrl: true, .. }) | (Key::F(3), _)) {
             self.toggle_fuss_mode();
             return Ok(());
         }
@@ -1342,6 +1342,12 @@ impl Editor {
     }
 
     fn delete_word_backward(&mut self) {
+        // For multi-cursor, use multi version
+        if self.cursors.len() > 1 {
+            self.delete_word_backward_multi();
+            return;
+        }
+
         if self.delete_selection() {
             return;
         }
@@ -1360,6 +1366,79 @@ impl Editor {
             self.history.record_delete(start_idx, deleted, cursor_before, cursor_after);
             self.history.maybe_break_group();
         }
+    }
+
+    fn delete_word_backward_multi(&mut self) {
+        // Collect cursor positions, process from bottom to top
+        let mut cursor_data: Vec<(usize, usize, usize)> = self.cursors.all()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.line, c.col))
+            .collect();
+
+        // Sort by position, bottom-right first
+        cursor_data.sort_by(|a, b| {
+            match b.1.cmp(&a.1) {
+                std::cmp::Ordering::Equal => b.2.cmp(&a.2),
+                ord => ord,
+            }
+        });
+
+        // Record all cursor positions before the operation
+        let cursors_before = self.all_cursor_positions();
+        self.history.begin_group();
+        self.history.set_cursors_before(cursors_before);
+
+        for (cursor_idx, line, col) in cursor_data {
+            if col == 0 {
+                continue; // Can't delete word at start of line in multi-cursor mode
+            }
+
+            // Find word start (same logic as move_word_left)
+            let line_str = self.buffer.line_str(line).unwrap_or_default();
+            let chars: Vec<char> = line_str.chars().collect();
+            let mut new_col = col;
+
+            // Skip whitespace backward
+            while new_col > 0 && chars.get(new_col - 1).map(|c| c.is_whitespace()).unwrap_or(false) {
+                new_col -= 1;
+            }
+
+            // Skip word characters backward
+            if new_col > 0 {
+                let is_word = chars.get(new_col - 1).map(|c| is_word_char(*c)).unwrap_or(false);
+                if is_word {
+                    while new_col > 0 && chars.get(new_col - 1).map(|c| is_word_char(*c)).unwrap_or(false) {
+                        new_col -= 1;
+                    }
+                } else {
+                    // Skip punctuation
+                    while new_col > 0 && chars.get(new_col - 1).map(|c| !c.is_whitespace() && !is_word_char(*c)).unwrap_or(false) {
+                        new_col -= 1;
+                    }
+                }
+            }
+
+            if new_col < col {
+                let cursor_before = Position::new(line, col);
+                let start_idx = self.buffer.line_col_to_char(line, new_col);
+                let end_idx = self.buffer.line_col_to_char(line, col);
+                let deleted: String = self.buffer.slice(start_idx, end_idx).chars().collect();
+
+                self.buffer.delete(start_idx, end_idx);
+                self.history.record_delete(start_idx, deleted, cursor_before, cursor_before);
+
+                // Update cursor position
+                let cursor = &mut self.cursors.all_mut()[cursor_idx];
+                cursor.col = new_col;
+                cursor.desired_col = new_col;
+            }
+        }
+
+        // Record all cursor positions after the operation
+        self.history.set_cursors_after(self.all_cursor_positions());
+        self.history.end_group();
+        self.cursors.merge_overlapping();
     }
 
     fn delete_word_forward(&mut self) {
@@ -1787,8 +1866,8 @@ impl Editor {
                 self.running = false;
             }
 
-            // Exit fuss mode
-            (Key::Escape, _) => {
+            // Exit fuss mode (Escape or F3)
+            (Key::Escape, _) | (Key::F(3), _) => {
                 self.fuss.deactivate();
             }
 
