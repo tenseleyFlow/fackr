@@ -18,6 +18,7 @@ const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor bac
 const CURRENT_LINE_BG: Color = Color::AnsiValue(236);    // Slightly lighter for current line
 const LINE_NUM_COLOR: Color = Color::AnsiValue(243);     // Gray for line numbers
 const CURRENT_LINE_NUM_COLOR: Color = Color::Yellow;     // Yellow for active line number
+const BRACKET_MATCH_BG: Color = Color::AnsiValue(240);   // Highlight for matching brackets
 
 /// Terminal screen renderer
 pub struct Screen {
@@ -89,6 +90,7 @@ impl Screen {
         viewport_line: usize,
         filename: Option<&str>,
         message: Option<&str>,
+        bracket_match: Option<(usize, usize)>,
     ) -> Result<()> {
         // Hide cursor during render to prevent flicker
         execute!(self.stdout, Hide)?;
@@ -126,12 +128,17 @@ impl Screen {
 
                 // Line content with selection highlighting
                 if let Some(line) = buffer.line_str(line_idx) {
+                    // Check if bracket match is on this line
+                    let bracket_col = bracket_match
+                        .filter(|(bl, _)| *bl == line_idx)
+                        .map(|(_, bc)| bc);
                     self.render_line_with_selection(
                         &line,
                         line_idx,
                         text_cols,
                         selection.as_ref(),
                         is_current_line,
+                        bracket_col,
                     )?;
                 }
 
@@ -178,68 +185,53 @@ impl Screen {
         max_cols: usize,
         selection: Option<&(Position, Position)>,
         is_current_line: bool,
+        bracket_col: Option<usize>,
     ) -> Result<()> {
         let chars: Vec<char> = line.chars().take(max_cols).collect();
         let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
 
-        if let Some((start, end)) = selection {
-            // Check if this line has any selection
+        // Determine selection range for this line
+        let (sel_start, sel_end) = if let Some((start, end)) = selection {
             let line_has_selection = line_idx >= start.line && line_idx <= end.line;
-
             if line_has_selection {
-                let sel_start_col = if line_idx == start.line { start.col } else { 0 };
-                let sel_end_col = if line_idx == end.line { end.col } else { chars.len() };
-
-                // Render in three parts: before selection, selection, after selection
-                // Before selection
-                if sel_start_col > 0 {
-                    let before: String = chars[..sel_start_col.min(chars.len())].iter().collect();
-                    execute!(
-                        self.stdout,
-                        SetBackgroundColor(line_bg),
-                        Print(&before)
-                    )?;
-                }
-
-                // Selection (highlighted)
-                if sel_start_col < chars.len() && sel_end_col > sel_start_col {
-                    let selected: String = chars[sel_start_col..sel_end_col.min(chars.len())].iter().collect();
-                    execute!(
-                        self.stdout,
-                        SetBackgroundColor(Color::Blue),
-                        SetForegroundColor(Color::White),
-                        Print(&selected),
-                        SetBackgroundColor(line_bg),
-                        ResetColor
-                    )?;
-                }
-
-                // After selection
-                if sel_end_col < chars.len() {
-                    let after: String = chars[sel_end_col..].iter().collect();
-                    execute!(
-                        self.stdout,
-                        SetBackgroundColor(line_bg),
-                        Print(&after)
-                    )?;
-                }
+                let s = if line_idx == start.line { start.col } else { 0 };
+                let e = if line_idx == end.line { end.col } else { chars.len() };
+                (Some(s), Some(e))
             } else {
-                // No selection on this line
-                let visible: String = chars.iter().collect();
-                execute!(
-                    self.stdout,
-                    SetBackgroundColor(line_bg),
-                    Print(&visible)
-                )?;
+                (None, None)
             }
         } else {
-            // No selection at all
-            let visible: String = chars.iter().collect();
-            execute!(
-                self.stdout,
-                SetBackgroundColor(line_bg),
-                Print(&visible)
-            )?;
+            (None, None)
+        };
+
+        // Render character by character for precise highlighting
+        for (col, ch) in chars.iter().enumerate() {
+            let in_selection = sel_start.map_or(false, |s| col >= s)
+                && sel_end.map_or(false, |e| col < e);
+            let is_bracket_match = bracket_col == Some(col);
+
+            let bg = if in_selection {
+                Color::Blue
+            } else if is_bracket_match {
+                BRACKET_MATCH_BG
+            } else {
+                line_bg
+            };
+
+            let fg = if in_selection {
+                Some(Color::White)
+            } else {
+                None
+            };
+
+            execute!(self.stdout, SetBackgroundColor(bg))?;
+            if let Some(fg_color) = fg {
+                execute!(self.stdout, SetForegroundColor(fg_color))?;
+            }
+            execute!(self.stdout, Print(ch))?;
+            if fg.is_some() {
+                execute!(self.stdout, ResetColor)?;
+            }
         }
 
         Ok(())

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyEvent};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -18,7 +19,9 @@ pub struct Editor {
     filename: Option<PathBuf>,
     running: bool,
     history: History,
-    clipboard: String,
+    clipboard: Option<Clipboard>,
+    /// Fallback internal clipboard if system clipboard unavailable
+    internal_clipboard: String,
     /// Message to display in status bar
     message: Option<String>,
     /// Escape key timeout in milliseconds (for Alt key detection)
@@ -37,6 +40,9 @@ impl Editor {
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
 
+        // Try to initialize system clipboard, fall back to internal if unavailable
+        let clipboard = Clipboard::new().ok();
+
         Ok(Self {
             buffer: Buffer::new(),
             cursor: Cursor::new(),
@@ -45,7 +51,8 @@ impl Editor {
             filename: None,
             running: true,
             history: History::new(),
-            clipboard: String::new(),
+            clipboard,
+            internal_clipboard: String::new(),
             message: None,
             escape_time,
         })
@@ -143,12 +150,16 @@ impl Editor {
     }
 
     fn render(&mut self) -> Result<()> {
+        // Find matching bracket for cursor position
+        let bracket_match = self.buffer.find_matching_bracket(self.cursor.line, self.cursor.col);
+
         self.screen.render(
             &self.buffer,
             &self.cursor,
             self.viewport_line,
             self.filename.as_ref().and_then(|p| p.to_str()),
             self.message.as_deref(),
+            bracket_match,
         )
     }
 
@@ -225,6 +236,11 @@ impl Editor {
             // Join lines: Ctrl+J
             (Key::Char('j'), Modifiers { ctrl: true, .. }) => self.join_lines(),
 
+            // Select line: Ctrl+L
+            (Key::Char('l'), Modifiers { ctrl: true, .. }) => self.select_line(),
+            // Select word: Ctrl+D (select word at cursor, or next occurrence if already selected)
+            (Key::Char('d'), Modifiers { ctrl: true, .. }) => self.select_word(),
+
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
                 self.insert_char(*c);
@@ -242,6 +258,9 @@ impl Editor {
             (Key::Char('w'), Modifiers { ctrl: true, .. }) => self.delete_word_backward(),
             // Delete word forward: Alt+D
             (Key::Char('d'), Modifiers { alt: true, .. }) => self.delete_word_forward(),
+
+            // Character transpose: Ctrl+T
+            (Key::Char('t'), Modifiers { ctrl: true, .. }) => self.transpose_chars(),
 
             _ => {}
         }
@@ -407,6 +426,58 @@ impl Editor {
         let line_len = self.buffer.line_len(new_line);
         let new_col = self.cursor.desired_col.min(line_len);
         self.cursor.move_to(new_line, new_col, extend_selection);
+    }
+
+    // === Selection ===
+
+    fn select_line(&mut self) {
+        // Select the entire current line (including newline if not last line)
+        let line_len = self.buffer.line_len(self.cursor.line);
+        self.cursor.anchor_line = self.cursor.line;
+        self.cursor.anchor_col = 0;
+        self.cursor.col = line_len;
+        self.cursor.desired_col = line_len;
+        self.cursor.selecting = true;
+    }
+
+    fn select_word(&mut self) {
+        // If no selection, select word at cursor
+        // If already have selection, this could expand to next occurrence (future enhancement)
+        if let Some(line_str) = self.buffer.line_str(self.cursor.line) {
+            let chars: Vec<char> = line_str.chars().collect();
+            let col = self.cursor.col.min(chars.len());
+
+            // Find word boundaries
+            let mut start = col;
+            let mut end = col;
+
+            // If cursor is on a word char, expand to word boundaries
+            if col < chars.len() && is_word_char(chars[col]) {
+                // Expand left
+                while start > 0 && is_word_char(chars[start - 1]) {
+                    start -= 1;
+                }
+                // Expand right
+                while end < chars.len() && is_word_char(chars[end]) {
+                    end += 1;
+                }
+            } else if col > 0 && is_word_char(chars[col - 1]) {
+                // Cursor is just after a word
+                end = col;
+                start = col - 1;
+                while start > 0 && is_word_char(chars[start - 1]) {
+                    start -= 1;
+                }
+            }
+
+            if start < end {
+                self.cursor.anchor_line = self.cursor.line;
+                self.cursor.anchor_col = start;
+                self.cursor.col = end;
+                self.cursor.desired_col = end;
+                self.cursor.selecting = true;
+            }
+        }
     }
 
     // === Editing ===
@@ -611,6 +682,54 @@ impl Editor {
         }
     }
 
+    fn transpose_chars(&mut self) {
+        // Transpose the two characters around the cursor
+        // If at end of line, swap the two chars before cursor
+        // If at start of line, do nothing
+        let line_len = self.buffer.line_len(self.cursor.line);
+        if line_len < 2 {
+            return;
+        }
+
+        let (swap_pos, move_cursor) = if self.cursor.col == 0 {
+            // At start of line - nothing to transpose
+            return;
+        } else if self.cursor.col >= line_len {
+            // At or past end of line - swap last two chars
+            (self.cursor.col - 2, false)
+        } else {
+            // In middle - swap char before cursor with char at cursor
+            (self.cursor.col - 1, true)
+        };
+
+        let idx = self.buffer.line_col_to_char(self.cursor.line, swap_pos);
+        let char1 = self.buffer.char_at(idx);
+        let char2 = self.buffer.char_at(idx + 1);
+
+        if let (Some(c1), Some(c2)) = (char1, char2) {
+            let cursor_before = self.cursor_pos();
+            self.history.begin_group();
+
+            // Delete both chars
+            let deleted = format!("{}{}", c1, c2);
+            self.buffer.delete(idx, idx + 2);
+            self.history.record_delete(idx, deleted, cursor_before, cursor_before);
+
+            // Insert in swapped order
+            let swapped = format!("{}{}", c2, c1);
+            self.buffer.insert(idx, &swapped);
+
+            if move_cursor {
+                self.cursor.col += 1;
+                self.cursor.desired_col = self.cursor.col;
+            }
+
+            let cursor_after = self.cursor_pos();
+            self.history.record_insert(idx, swapped, cursor_before, cursor_after);
+            self.history.end_group();
+        }
+    }
+
     fn dedent(&mut self) {
         if self.cursor.has_selection() {
             self.dedent_selection();
@@ -791,14 +910,32 @@ impl Editor {
         })
     }
 
+    /// Set clipboard text (system if available, internal fallback)
+    fn set_clipboard(&mut self, text: String) {
+        if let Some(ref mut cb) = self.clipboard {
+            let _ = cb.set_text(&text);
+        }
+        self.internal_clipboard = text;
+    }
+
+    /// Get clipboard text (system if available, internal fallback)
+    fn get_clipboard(&mut self) -> String {
+        if let Some(ref mut cb) = self.clipboard {
+            if let Ok(text) = cb.get_text() {
+                return text;
+            }
+        }
+        self.internal_clipboard.clone()
+    }
+
     fn copy(&mut self) {
         if let Some(text) = self.get_selection_text() {
-            self.clipboard = text;
+            self.set_clipboard(text);
             self.message = Some("Copied".to_string());
         } else {
             // Copy current line
             if let Some(line) = self.buffer.line_str(self.cursor.line) {
-                self.clipboard = format!("{}\n", line);
+                self.set_clipboard(format!("{}\n", line));
                 self.message = Some("Copied line".to_string());
             }
         }
@@ -806,13 +943,13 @@ impl Editor {
 
     fn cut(&mut self) {
         if let Some(text) = self.get_selection_text() {
-            self.clipboard = text;
+            self.set_clipboard(text);
             self.delete_selection();
             self.message = Some("Cut".to_string());
         } else {
             // Cut current line
             if let Some(line) = self.buffer.line_str(self.cursor.line) {
-                self.clipboard = format!("{}\n", line);
+                self.set_clipboard(format!("{}\n", line));
                 let cursor_before = self.cursor_pos();
 
                 let line_start = self.buffer.line_col_to_char(self.cursor.line, 0);
@@ -855,8 +992,9 @@ impl Editor {
     }
 
     fn paste(&mut self) {
-        if !self.clipboard.is_empty() {
-            self.insert_text(&self.clipboard.clone());
+        let text = self.get_clipboard();
+        if !text.is_empty() {
+            self.insert_text(&text);
             self.message = Some("Pasted".to_string());
             self.history.maybe_break_group();
         }

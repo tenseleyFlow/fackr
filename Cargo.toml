@@ -18,6 +18,9 @@ unicode-width = "0.1"
 thiserror = "1"
 anyhow = "1"
 
+# System clipboard
+arboard = "3"
+
 [profile.release]
 opt-level = 3
 lto = true

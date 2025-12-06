@@ -154,6 +154,45 @@ impl Buffer {
         let end = end.min(self.text.len_chars());
         self.text.slice(start..end)
     }
+
+    /// Find matching bracket for the character at the given position
+    /// Returns (line, col) of matching bracket, or None if not found
+    pub fn find_matching_bracket(&self, line: usize, col: usize) -> Option<(usize, usize)> {
+        let char_idx = self.line_col_to_char(line, col);
+        let ch = self.char_at(char_idx)?;
+
+        let (target, direction) = match ch {
+            '(' => (')', 1i32),
+            ')' => ('(', -1),
+            '[' => (']', 1),
+            ']' => ('[', -1),
+            '{' => ('}', 1),
+            '}' => ('{', -1),
+            '<' => ('>', 1),
+            '>' => ('<', -1),
+            _ => return None,
+        };
+
+        let mut depth = 1;
+        let mut pos = char_idx as i32 + direction;
+        let len = self.text.len_chars() as i32;
+
+        while pos >= 0 && pos < len {
+            if let Some(c) = self.char_at(pos as usize) {
+                if c == target {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(self.char_to_line_col(pos as usize));
+                    }
+                } else if c == ch {
+                    depth += 1;
+                }
+            }
+            pos += direction;
+        }
+
+        None
+    }
 }
 
 #[cfg(test)]
