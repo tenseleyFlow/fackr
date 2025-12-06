@@ -46,6 +46,7 @@ impl Screen {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) -> Result<()> {
         execute!(self.stdout, Clear(ClearType::All))?;
         Ok(())

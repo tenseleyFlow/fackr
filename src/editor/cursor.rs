@@ -12,12 +12,14 @@ impl Cursor {
         Self::default()
     }
 
+    #[allow(dead_code)]
     pub fn set(&mut self, line: usize, col: usize) {
         self.line = line;
         self.col = col;
         self.desired_col = col;
     }
 
+    #[allow(dead_code)]
     pub fn move_to(&mut self, line: usize, col: usize) {
         self.line = line;
         self.col = col;

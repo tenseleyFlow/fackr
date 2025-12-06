@@ -25,6 +25,7 @@ impl Buffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         Self {
             text: Rope::from_str(s),
@@ -73,12 +74,13 @@ impl Buffer {
     }
 
     /// Get total character count
+    #[allow(dead_code)]
     pub fn char_count(&self) -> usize {
         self.text.len_chars()
     }
 
     /// Get a line's content (0-indexed)
-    pub fn line(&self, line_idx: usize) -> Option<ropey::RopeSlice> {
+    pub fn line(&self, line_idx: usize) -> Option<ropey::RopeSlice<'_>> {
         if line_idx < self.text.len_lines() {
             Some(self.text.line(line_idx))
         } else {
@@ -120,6 +122,7 @@ impl Buffer {
     }
 
     /// Convert absolute char index to (line, col)
+    #[allow(dead_code)]
     pub fn char_to_line_col(&self, char_idx: usize) -> (usize, usize) {
         let idx = char_idx.min(self.text.len_chars());
         let line = self.text.char_to_line(idx);
@@ -129,6 +132,7 @@ impl Buffer {
     }
 
     /// Get character at position
+    #[allow(dead_code)]
     pub fn char_at(&self, char_idx: usize) -> Option<char> {
         if char_idx < self.text.len_chars() {
             Some(self.text.char(char_idx))
@@ -138,12 +142,14 @@ impl Buffer {
     }
 
     /// Check if buffer is empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.text.len_chars() == 0
     }
 
     /// Get rope slice for a range
-    pub fn slice(&self, start: usize, end: usize) -> ropey::RopeSlice {
+    #[allow(dead_code)]
+    pub fn slice(&self, start: usize, end: usize) -> ropey::RopeSlice<'_> {
         let start = start.min(self.text.len_chars());
         let end = end.min(self.text.len_chars());
         self.text.slice(start..end)
