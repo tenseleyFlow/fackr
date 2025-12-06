@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
+    event::{
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -15,6 +18,7 @@ pub struct Screen {
     stdout: Stdout,
     pub rows: u16,
     pub cols: u16,
+    keyboard_enhanced: bool,
 }
 
 impl Screen {
@@ -24,16 +28,35 @@ impl Screen {
             stdout: stdout(),
             rows,
             cols,
+            keyboard_enhanced: false,
         })
     }
 
     pub fn enter_raw_mode(&mut self) -> Result<()> {
         terminal::enable_raw_mode()?;
         execute!(self.stdout, EnterAlternateScreen, Hide)?;
+
+        // Try to enable keyboard enhancement for better modifier key detection
+        // This enables the kitty keyboard protocol on supporting terminals
+        if execute!(
+            self.stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
+        )
+        .is_ok()
+        {
+            self.keyboard_enhanced = true;
+        }
+
         Ok(())
     }
 
     pub fn leave_raw_mode(&mut self) -> Result<()> {
+        if self.keyboard_enhanced {
+            let _ = execute!(self.stdout, PopKeyboardEnhancementFlags);
+        }
         execute!(self.stdout, Show, LeaveAlternateScreen)?;
         terminal::disable_raw_mode()?;
         Ok(())

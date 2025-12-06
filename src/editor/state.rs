@@ -51,24 +51,36 @@ impl Editor {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        while self.running {
-            self.screen.refresh_size()?;
-            self.render()?;
+        // Initial render
+        self.screen.refresh_size()?;
+        self.render()?;
 
-            // Process all available events before rendering again
-            // Use a short timeout to remain responsive
-            if event::poll(Duration::from_millis(16))? {
-                // Process all queued events
-                loop {
-                    if let Event::Key(key_event) = event::read()? {
-                        self.handle_key(key_event)?;
+        while self.running {
+            // Block until an event is available (no busy polling)
+            match event::read()? {
+                Event::Key(key_event) => self.handle_key(key_event)?,
+                Event::Resize(cols, rows) => {
+                    self.screen.cols = cols;
+                    self.screen.rows = rows;
+                }
+                _ => {}
+            }
+
+            // Process any additional queued events before rendering
+            while event::poll(Duration::from_millis(0))? {
+                match event::read()? {
+                    Event::Key(key_event) => self.handle_key(key_event)?,
+                    Event::Resize(cols, rows) => {
+                        self.screen.cols = cols;
+                        self.screen.rows = rows;
                     }
-                    // Check if more events are immediately available
-                    if !event::poll(Duration::from_millis(0))? {
-                        break;
-                    }
+                    _ => {}
                 }
             }
+
+            // Only render after processing events
+            self.screen.refresh_size()?;
+            self.render()?;
         }
 
         self.screen.leave_raw_mode()?;
