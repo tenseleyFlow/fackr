@@ -8,7 +8,7 @@ use crossterm::{
 use std::io::{stdout, Stdout, Write};
 
 use crate::buffer::Buffer;
-use crate::editor::Cursor;
+use crate::editor::{Cursor, Position};
 
 /// Terminal screen renderer
 pub struct Screen {
@@ -59,9 +59,13 @@ impl Screen {
         cursor: &Cursor,
         viewport_line: usize,
         filename: Option<&str>,
+        message: Option<&str>,
     ) -> Result<()> {
         let line_num_width = self.line_number_width(buffer.line_count());
-        let text_cols = self.cols as usize - line_num_width - 1; // -1 for separator
+        let text_cols = self.cols as usize - line_num_width - 1;
+
+        // Get selection bounds if any
+        let selection = cursor.selection_bounds();
 
         // Reserve 1 row for status bar
         let text_rows = self.rows.saturating_sub(1) as usize;
@@ -80,10 +84,14 @@ impl Screen {
                     ResetColor
                 )?;
 
-                // Line content
+                // Line content with selection highlighting
                 if let Some(line) = buffer.line_str(line_idx) {
-                    let visible: String = line.chars().take(text_cols).collect();
-                    execute!(self.stdout, Print(&visible))?;
+                    self.render_line_with_selection(
+                        &line,
+                        line_idx,
+                        text_cols,
+                        selection.as_ref(),
+                    )?;
                 }
             } else {
                 // Empty line indicator
@@ -100,7 +108,7 @@ impl Screen {
         }
 
         // Status bar
-        self.render_status_bar(buffer, cursor, filename)?;
+        self.render_status_bar(buffer, cursor, filename, message)?;
 
         // Position cursor
         let cursor_row = cursor.line.saturating_sub(viewport_line);
@@ -115,11 +123,67 @@ impl Screen {
         Ok(())
     }
 
+    fn render_line_with_selection(
+        &mut self,
+        line: &str,
+        line_idx: usize,
+        max_cols: usize,
+        selection: Option<&(Position, Position)>,
+    ) -> Result<()> {
+        let chars: Vec<char> = line.chars().take(max_cols).collect();
+
+        if let Some((start, end)) = selection {
+            // Check if this line has any selection
+            let line_has_selection = line_idx >= start.line && line_idx <= end.line;
+
+            if line_has_selection {
+                let sel_start_col = if line_idx == start.line { start.col } else { 0 };
+                let sel_end_col = if line_idx == end.line { end.col } else { chars.len() };
+
+                // Render in three parts: before selection, selection, after selection
+                // Before selection
+                if sel_start_col > 0 {
+                    let before: String = chars[..sel_start_col.min(chars.len())].iter().collect();
+                    execute!(self.stdout, Print(&before))?;
+                }
+
+                // Selection (highlighted)
+                if sel_start_col < chars.len() && sel_end_col > sel_start_col {
+                    let selected: String = chars[sel_start_col..sel_end_col.min(chars.len())].iter().collect();
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::Blue),
+                        SetForegroundColor(Color::White),
+                        Print(&selected),
+                        ResetColor
+                    )?;
+                }
+
+                // After selection
+                if sel_end_col < chars.len() {
+                    let after: String = chars[sel_end_col..].iter().collect();
+                    execute!(self.stdout, Print(&after))?;
+                }
+            } else {
+                // No selection on this line
+                let visible: String = chars.iter().collect();
+                execute!(self.stdout, Print(&visible))?;
+            }
+        } else {
+            // No selection at all
+            let visible: String = chars.iter().collect();
+            execute!(self.stdout, Print(&visible))?;
+        }
+
+        Ok(())
+    }
+
     fn render_status_bar(
         &mut self,
         buffer: &Buffer,
         cursor: &Cursor,
         filename: Option<&str>,
+        message: Option<&str>,
     ) -> Result<()> {
         let status_row = self.rows.saturating_sub(1);
         execute!(self.stdout, MoveTo(0, status_row))?;
@@ -136,12 +200,17 @@ impl Screen {
         let modified = if buffer.modified { " [+]" } else { "" };
         let left = format!(" {}{}", name, modified);
 
-        // Right side: position
-        let right = format!(" Ln {}, Col {} ", cursor.line + 1, cursor.col + 1);
+        // Right side: position (and message if any)
+        let pos = format!("Ln {}, Col {}", cursor.line + 1, cursor.col + 1);
+        let right = if let Some(msg) = message {
+            format!(" {} | {} ", msg, pos)
+        } else {
+            format!(" {} ", pos)
+        };
 
         // Pad middle
-        let padding = self.cols as usize - left.len() - right.len();
-        let middle = " ".repeat(padding.max(0));
+        let padding = (self.cols as usize).saturating_sub(left.len() + right.len());
+        let middle = " ".repeat(padding);
 
         execute!(
             self.stdout,
