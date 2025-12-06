@@ -167,6 +167,16 @@ impl Editor {
         // Clear message on any key
         self.message = None;
 
+        // Break undo group on any non-character key (movement, commands, etc.)
+        // This ensures each "typing session" is its own undo unit
+        let is_typing = matches!(
+            (&key, &mods),
+            (Key::Char(_), Modifiers { ctrl: false, alt: false, .. })
+        );
+        if !is_typing {
+            self.history.maybe_break_group();
+        }
+
         match (&key, &mods) {
             // === System ===
             // Quit: Ctrl+Q
