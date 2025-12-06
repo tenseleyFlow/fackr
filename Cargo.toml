@@ -1,0 +1,23 @@
+[package]
+name = "fac"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal text editor"
+authors = ["Matthew Forrester Wolffe"]
+
+[dependencies]
+# Terminal
+crossterm = "0.28"
+
+# Text handling
+ropey = "1.6"
+unicode-segmentation = "1.10"
+unicode-width = "0.1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
