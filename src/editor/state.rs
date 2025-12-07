@@ -323,13 +323,21 @@ impl Editor {
 
     /// Handle mouse input
     fn handle_mouse(&mut self, mouse: Mouse) -> Result<()> {
+        // Calculate offsets for fuss mode and tab bar
+        let left_offset = if self.workspace.fuss.active {
+            self.workspace.fuss.width(self.screen.cols) as usize
+        } else {
+            0
+        };
+        let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+
         // Calculate line number column width (same as in screen.rs)
         let line_num_width = {
             let line_count = self.buffer().line_count();
             let digits = if line_count == 0 { 1 } else { (line_count as f64).log10().floor() as usize + 1 };
             digits.max(3)
         };
-        let text_start_col = line_num_width + 1;
+        let text_start_col = left_offset + line_num_width + 1;
 
         match mouse {
             Mouse::Click { button: Button::Left, col, row, modifiers } => {
@@ -337,11 +345,11 @@ impl Editor {
                 let screen_row = row as usize;
                 let screen_col = col as usize;
 
-                // Check if click is in the text area (not line numbers, not status bar)
+                // Check if click is in the text area (not line numbers, not status bar, not fuss pane)
                 let status_row = self.screen.rows.saturating_sub(1) as usize;
-                if screen_row < status_row && screen_col >= text_start_col {
-                    // Calculate buffer position
-                    let buffer_line = self.viewport_line() + screen_row;
+                if screen_row >= top_offset && screen_row < status_row && screen_col >= text_start_col {
+                    // Calculate buffer position (accounting for top_offset)
+                    let buffer_line = self.viewport_line() + (screen_row - top_offset);
                     let buffer_col = screen_col - text_start_col;
 
                     // Clamp to valid positions
@@ -369,8 +377,8 @@ impl Editor {
                 let screen_col = col as usize;
 
                 let status_row = self.screen.rows.saturating_sub(1) as usize;
-                if screen_row < status_row && screen_col >= text_start_col {
-                    let buffer_line = self.viewport_line() + screen_row;
+                if screen_row >= top_offset && screen_row < status_row && screen_col >= text_start_col {
+                    let buffer_line = self.viewport_line() + (screen_row - top_offset);
                     let buffer_col = screen_col - text_start_col;
 
                     if buffer_line < self.buffer().line_count() {
