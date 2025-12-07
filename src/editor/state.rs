@@ -2302,9 +2302,11 @@ impl Editor {
             }
 
             // Toggle hints (Ctrl+/ may send different codes depending on terminal)
+            // Different terminals send: Ctrl+/, Ctrl+_, \x1f (ASCII 31), or Ctrl+7
             (Key::Char('/'), Modifiers { ctrl: true, .. })
             | (Key::Char('_'), Modifiers { ctrl: true, .. })
-            | (Key::Char('\x1f'), _) => {  // ASCII 31 = Ctrl+/
+            | (Key::Char('\x1f'), _)  // ASCII 31 = Ctrl+/
+            | (Key::Char('7'), Modifiers { ctrl: true, .. }) => {
                 self.workspace.fuss.toggle_hints();
             }
 
