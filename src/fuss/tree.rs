@@ -4,6 +4,23 @@
 
 use std::path::{Path, PathBuf};
 use std::fs;
+use std::process::Command;
+use std::collections::HashMap;
+
+/// Git status for a file
+#[derive(Debug, Clone, Default)]
+pub struct GitStatus {
+    /// File is staged (added to index)
+    pub staged: bool,
+    /// File has unstaged changes
+    pub unstaged: bool,
+    /// File is untracked
+    pub untracked: bool,
+    /// File has incoming changes (after fetch)
+    pub incoming: bool,
+    /// File is gitignored
+    pub gitignored: bool,
+}
 
 /// A node in the file tree
 #[derive(Debug, Clone)]
@@ -20,6 +37,8 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
     /// Depth in tree (for indentation)
     pub depth: usize,
+    /// Git status for this file
+    pub git_status: GitStatus,
 }
 
 impl TreeNode {
@@ -39,6 +58,7 @@ impl TreeNode {
             expanded: depth == 0, // Root is expanded by default
             children: Vec::new(),
             depth,
+            git_status: GitStatus::default(),
         }
     }
 
@@ -114,6 +134,8 @@ pub struct VisibleItem {
     pub expanded: bool,
     /// Indentation depth
     pub depth: usize,
+    /// Git status
+    pub git_status: GitStatus,
 }
 
 impl FileTree {
@@ -146,6 +168,7 @@ impl FileTree {
                 is_dir: node.is_dir,
                 expanded: node.expanded,
                 depth: node.depth,
+                git_status: node.git_status.clone(),
             });
         }
 
@@ -226,4 +249,211 @@ impl FileTree {
             }
         }
     }
+
+    /// Update git status for all files in the tree
+    pub fn update_git_status(&mut self) {
+        let root_path = self.root.path.clone();
+        let status_map = get_git_status(&root_path);
+        Self::apply_git_status(&mut self.root, &status_map, &root_path);
+        // Smart collapse: only expand directories with dirty files
+        Self::smart_collapse_node(&mut self.root, true);
+        self.rebuild_visible();
+    }
+
+    fn apply_git_status(node: &mut TreeNode, status_map: &HashMap<PathBuf, GitStatus>, root: &Path) {
+        // Get relative path from root
+        if let Ok(rel_path) = node.path.strip_prefix(root) {
+            if let Some(status) = status_map.get(rel_path) {
+                node.git_status = status.clone();
+            } else {
+                node.git_status = GitStatus::default();
+            }
+        }
+
+        // Recurse into children
+        for child in &mut node.children {
+            Self::apply_git_status(child, status_map, root);
+        }
+    }
+
+    /// Check if tree has any dirty files (staged, unstaged, or untracked)
+    pub fn has_dirty_files(&self) -> bool {
+        Self::node_has_dirty(&self.root)
+    }
+
+    fn node_has_dirty(node: &TreeNode) -> bool {
+        if node.git_status.staged || node.git_status.unstaged || node.git_status.untracked {
+            return true;
+        }
+        for child in &node.children {
+            if Self::node_has_dirty(child) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Smart collapse: Only expand directories that contain dirty files
+    /// Root is always expanded
+    pub fn smart_collapse(&mut self) {
+        Self::smart_collapse_node(&mut self.root, true);
+        self.rebuild_visible();
+    }
+
+    /// Returns true if node or any descendant has dirty files
+    fn smart_collapse_node(node: &mut TreeNode, is_root: bool) -> bool {
+        if !node.is_dir {
+            // Files: return whether they're dirty
+            return node.git_status.staged || node.git_status.unstaged || node.git_status.untracked;
+        }
+
+        // Directory: check all children first
+        let mut has_dirty_descendant = false;
+        for child in &mut node.children {
+            if Self::smart_collapse_node(child, false) {
+                has_dirty_descendant = true;
+            }
+        }
+
+        // Root stays expanded, others only expand if they have dirty descendants
+        if is_root {
+            node.expanded = true;
+        } else {
+            node.expanded = has_dirty_descendant;
+        }
+
+        has_dirty_descendant
+    }
+}
+
+/// Parse git status --porcelain output and return a map of file paths to git status
+fn get_git_status(root: &Path) -> HashMap<PathBuf, GitStatus> {
+    let mut status_map = HashMap::new();
+
+    // Run git status --porcelain
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("status")
+        .arg("--porcelain")
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.len() < 4 {
+                    continue;
+                }
+
+                // Format: XY filename
+                // X = index status, Y = worktree status
+                let index_status = line.chars().next().unwrap_or(' ');
+                let worktree_status = line.chars().nth(1).unwrap_or(' ');
+                let filename = line[3..].trim();
+
+                // Handle renamed files (format: "R  old -> new")
+                let filename = if filename.contains(" -> ") {
+                    filename.split(" -> ").last().unwrap_or(filename)
+                } else {
+                    filename
+                };
+
+                let path = PathBuf::from(filename);
+                let mut status = GitStatus::default();
+
+                // Check for ignored (!! status)
+                if index_status == '!' && worktree_status == '!' {
+                    status.gitignored = true;
+                }
+                // Check for untracked
+                else if index_status == '?' && worktree_status == '?' {
+                    status.untracked = true;
+                } else {
+                    // Staged: any non-space, non-? in index position
+                    if index_status != ' ' && index_status != '?' {
+                        status.staged = true;
+                    }
+                    // Unstaged: any non-space, non-? in worktree position
+                    if worktree_status != ' ' && worktree_status != '?' {
+                        status.unstaged = true;
+                    }
+                }
+
+                status_map.insert(path, status);
+            }
+        }
+    }
+
+    // Also get ignored files using --ignored flag
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--ignored")
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.len() < 4 {
+                    continue;
+                }
+
+                let index_status = line.chars().next().unwrap_or(' ');
+                let worktree_status = line.chars().nth(1).unwrap_or(' ');
+
+                // !! means ignored
+                if index_status == '!' && worktree_status == '!' {
+                    let filename = line[3..].trim();
+                    let path = PathBuf::from(filename);
+
+                    // Only add if not already in map with other status
+                    status_map.entry(path).or_insert_with(|| {
+                        let mut s = GitStatus::default();
+                        s.gitignored = true;
+                        s
+                    });
+                }
+            }
+        }
+    }
+
+    // Get files with incoming changes (differ from upstream)
+    // Use git diff --name-only @{u}...HEAD to see files changed in upstream but not in local
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("diff")
+        .arg("--name-only")
+        .arg("HEAD...@{u}")
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let filename = line.trim();
+                if filename.is_empty() {
+                    continue;
+                }
+                let path = PathBuf::from(filename);
+
+                // Mark as having incoming changes
+                status_map
+                    .entry(path)
+                    .and_modify(|s| s.incoming = true)
+                    .or_insert_with(|| {
+                        let mut s = GitStatus::default();
+                        s.incoming = true;
+                        s
+                    });
+            }
+        }
+        // If command fails (no upstream), that's fine - just no incoming indicators
+    }
+
+    status_map
 }

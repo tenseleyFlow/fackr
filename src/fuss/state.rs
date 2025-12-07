@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use super::tree::FileTree;
 
 /// Fuss mode state
@@ -47,7 +48,9 @@ impl FussMode {
     /// Initialize with a root path
     pub fn init(&mut self, root_path: &Path) {
         self.root_path = Some(root_path.to_path_buf());
-        self.tree = Some(FileTree::new(root_path));
+        let mut tree = FileTree::new(root_path);
+        tree.update_git_status();
+        self.tree = Some(tree);
         self.selected = 0;
         self.scroll = 0;
     }
@@ -160,6 +163,275 @@ impl FussMode {
     pub fn reload(&mut self) {
         if let Some(ref mut tree) = self.tree {
             tree.reload();
+            tree.update_git_status();
+        }
+    }
+
+    /// Refresh git status without reloading file tree
+    pub fn refresh_git_status(&mut self) {
+        if let Some(ref mut tree) = self.tree {
+            tree.update_git_status();
+        }
+    }
+
+    /// Stage the currently selected file
+    /// Returns true on success, false on failure
+    pub fn stage_selected(&mut self) -> bool {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+
+        let path = match self.selected_path() {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Don't stage directories
+        if self.is_dir_selected() {
+            return false;
+        }
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("add")
+            .arg(&path)
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                self.refresh_git_status();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Unstage the currently selected file
+    /// Returns true on success, false on failure
+    pub fn unstage_selected(&mut self) -> bool {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+
+        let path = match self.selected_path() {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Don't unstage directories
+        if self.is_dir_selected() {
+            return false;
+        }
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("restore")
+            .arg("--staged")
+            .arg(&path)
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                self.refresh_git_status();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the root path
+    pub fn root_path(&self) -> Option<&Path> {
+        self.root_path.as_deref()
+    }
+
+    /// Push to remote
+    /// Returns (success, message)
+    pub fn git_push(&mut self) -> (bool, String) {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return (false, "No workspace".to_string()),
+        };
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("push")
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.refresh_git_status();
+                (true, "Pushed".to_string())
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("Push failed: {}", stderr.lines().next().unwrap_or("unknown error")))
+            }
+            Err(e) => (false, format!("Failed to run git: {}", e)),
+        }
+    }
+
+    /// Pull from remote
+    /// Returns (success, message)
+    pub fn git_pull(&mut self) -> (bool, String) {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return (false, "No workspace".to_string()),
+        };
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("pull")
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.refresh_git_status();
+                (true, "Pulled".to_string())
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("Pull failed: {}", stderr.lines().next().unwrap_or("unknown error")))
+            }
+            Err(e) => (false, format!("Failed to run git: {}", e)),
+        }
+    }
+
+    /// Create a git tag
+    /// Returns (success, message)
+    pub fn git_tag(&mut self, tag_name: &str) -> (bool, String) {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return (false, "No workspace".to_string()),
+        };
+
+        if tag_name.trim().is_empty() {
+            return (false, "Empty tag name".to_string());
+        }
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("tag")
+            .arg(tag_name.trim())
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                (true, format!("Created tag: {}", tag_name.trim()))
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("Tag failed: {}", stderr.lines().next().unwrap_or("unknown error")))
+            }
+            Err(e) => (false, format!("Failed to run git: {}", e)),
+        }
+    }
+
+    /// Fetch from remote
+    /// Returns (success, message)
+    pub fn git_fetch(&mut self) -> (bool, String) {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return (false, "No workspace".to_string()),
+        };
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("fetch")
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.refresh_git_status();
+                (true, "Fetched".to_string())
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                (false, format!("Fetch failed: {}", stderr.lines().next().unwrap_or("unknown error")))
+            }
+            Err(e) => (false, format!("Failed to run git: {}", e)),
+        }
+    }
+
+    /// Commit staged changes with the given message
+    /// Returns (success, message)
+    pub fn git_commit(&mut self, message: &str) -> (bool, String) {
+        let root = match &self.root_path {
+            Some(p) => p.clone(),
+            None => return (false, "No workspace".to_string()),
+        };
+
+        if message.trim().is_empty() {
+            return (false, "Empty commit message".to_string());
+        }
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .arg("commit")
+            .arg("-m")
+            .arg(message)
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                self.refresh_git_status();
+                (true, "Committed".to_string())
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("nothing to commit") {
+                    (false, "Nothing to commit".to_string())
+                } else {
+                    (false, format!("Commit failed: {}", stderr.lines().next().unwrap_or("unknown error")))
+                }
+            }
+            Err(e) => (false, format!("Failed to run git: {}", e)),
+        }
+    }
+
+    /// Get git diff for the currently selected file
+    /// Returns (filename, diff_content) or None if no diff
+    pub fn get_diff_for_selected(&self) -> Option<(String, String)> {
+        let root = self.root_path.as_ref()?;
+        let path = self.selected_path()?;
+
+        // Don't diff directories
+        if self.is_dir_selected() {
+            return None;
+        }
+
+        // Get relative path for display
+        let rel_path = path.strip_prefix(root).unwrap_or(&path);
+        let filename = rel_path.to_string_lossy().to_string();
+
+        // Run git diff
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("diff")
+            .arg("HEAD")
+            .arg("--")
+            .arg(&path)
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let diff = String::from_utf8_lossy(&output.stdout).to_string();
+            if diff.is_empty() {
+                Some((filename, "(no changes)".to_string()))
+            } else {
+                Some((filename, diff))
+            }
+        } else {
+            None
         }
     }
 }

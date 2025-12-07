@@ -8,4 +8,4 @@ mod state;
 
 pub use state::FussMode;
 #[allow(unused_imports)]
-pub use tree::{FileTree, TreeNode, VisibleItem};
+pub use tree::{FileTree, GitStatus, TreeNode, VisibleItem};
