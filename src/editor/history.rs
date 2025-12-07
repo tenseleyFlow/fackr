@@ -107,7 +107,6 @@ impl History {
     /// Add an operation to the current group
     pub fn push(&mut self, op: Operation) {
         self.current_group.push(op);
-        // Clear redo stack when new operations are added
         self.redo_stack.clear();
     }
 
