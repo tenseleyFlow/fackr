@@ -16,7 +16,9 @@
 //! - `fackr <file>` - Implicitly opens containing directory as workspace
 //! - `fackr` (no args) - Opens current directory as workspace
 
+mod recents;
 mod state;
 
+pub use recents::{recents_add_or_update, recents_get, Recent};
 #[allow(unused_imports)]
-pub use state::{Workspace, WorkspaceConfig};
+pub use state::{BufferEntry, Pane, PaneBounds, PaneDirection, Tab, Workspace, WorkspaceConfig};

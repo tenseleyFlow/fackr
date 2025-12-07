@@ -1,6 +1,8 @@
 use anyhow::Result;
 use ropey::Rope;
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
@@ -158,6 +160,28 @@ impl Buffer {
         let start = start.min(self.text.len_chars());
         let end = end.min(self.text.len_chars());
         self.text.slice(start..end)
+    }
+
+    /// Get entire buffer content as a String
+    pub fn contents(&self) -> String {
+        self.text.to_string()
+    }
+
+    /// Compute a hash of the buffer contents for change detection
+    pub fn content_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        // Hash character by character to ensure consistent hashing
+        // regardless of rope's internal chunk structure
+        for ch in self.text.chars() {
+            ch.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Replace entire buffer content (used for backup restoration)
+    pub fn set_contents(&mut self, content: &str) {
+        self.text = Rope::from_str(content);
+        self.modified = true;
     }
 
     /// Find matching bracket for the character at the given position
