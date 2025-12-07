@@ -2251,9 +2251,15 @@ impl Editor {
                 self.workspace.fuss.move_down();
             }
 
-            // Toggle expand/collapse directory
+            // Toggle expand/collapse directory, or collapse parent if on a file/collapsed dir
             (Key::Char(' '), _) => {
-                self.workspace.fuss.toggle_expand();
+                if self.workspace.fuss.is_dir_selected() {
+                    // If on a directory, toggle its expand state
+                    self.workspace.fuss.toggle_expand();
+                } else {
+                    // If on a file, collapse parent directory
+                    self.workspace.fuss.collapse_parent();
+                }
             }
 
             // Expand directory (right arrow)
@@ -2271,18 +2277,24 @@ impl Editor {
                 }
             }
 
-            // Collapse directory (left arrow)
+            // Collapse directory or go to parent (left arrow)
             (Key::Left, _) => {
+                let mut collapsed = false;
                 if self.workspace.fuss.is_dir_selected() {
-                    // Only collapse if expanded
+                    // If on an expanded directory, collapse it
                     if let Some(ref tree) = self.workspace.fuss.tree {
                         let items = tree.visible_items();
                         if let Some(item) = items.get(self.workspace.fuss.selected) {
                             if item.is_dir && item.expanded {
                                 self.workspace.fuss.toggle_expand();
+                                collapsed = true;
                             }
                         }
                     }
+                }
+                // If not collapsed (either a file or already-collapsed dir), go to parent
+                if !collapsed {
+                    self.workspace.fuss.collapse_parent();
                 }
             }
 

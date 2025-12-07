@@ -129,6 +129,48 @@ impl FussMode {
         false
     }
 
+    /// Collapse the parent directory of the currently selected item
+    /// and move selection to that parent. Returns true if a parent was collapsed.
+    pub fn collapse_parent(&mut self) -> bool {
+        let tree = match &self.tree {
+            Some(t) => t,
+            None => return false,
+        };
+
+        let items = tree.visible_items();
+        if self.selected >= items.len() {
+            return false;
+        }
+
+        let current_depth = items[self.selected].depth;
+
+        // Can't collapse parent if at root level (depth 1)
+        if current_depth <= 1 {
+            return false;
+        }
+
+        // Find the parent directory by scanning backwards for a directory
+        // with depth = current_depth - 1
+        let parent_depth = current_depth - 1;
+        let mut parent_idx = None;
+
+        for i in (0..self.selected).rev() {
+            if items[i].is_dir && items[i].depth == parent_depth {
+                parent_idx = Some(i);
+                break;
+            }
+        }
+
+        if let Some(idx) = parent_idx {
+            // Move selection to parent and collapse it
+            self.selected = idx;
+            self.toggle_expand();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Toggle showing hidden files
     pub fn toggle_hidden(&mut self) {
         if let Some(ref mut tree) = self.tree {
