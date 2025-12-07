@@ -1,0 +1,123 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Build fackr
+      run: cargo build --release
+
+    - name: Create release archive
+      shell: pwsh
+      run: |
+        $version = (Get-Content Cargo.toml | Select-String 'version = "(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1)
+        New-Item -ItemType Directory -Force -Path release
+        Copy-Item target/release/fackr.exe release/
+        Copy-Item target/release/fac.exe release/ -ErrorAction SilentlyContinue
+        Compress-Archive -Path release/* -DestinationPath "fackr-$version-windows-x86_64.zip"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fackr-windows-x86_64
+        path: fackr-*-windows-x86_64.zip
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: fackr-*-windows-x86_64.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Build fackr
+      run: cargo build --release
+
+    - name: Create release archive
+      run: |
+        VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        mkdir -p release
+        cp target/release/fackr release/
+        cp target/release/fac release/
+        cd release
+        tar -czvf ../fackr-${VERSION}-linux-x86_64.tar.gz *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fackr-linux-x86_64
+        path: fackr-*-linux-x86_64.tar.gz
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: fackr-*-linux-x86_64.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Build fackr
+      run: cargo build --release
+
+    - name: Create release archive
+      run: |
+        VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        ARCH=$(uname -m)
+        mkdir -p release
+        cp target/release/fackr release/
+        cp target/release/fac release/
+        cd release
+        tar -czvf ../fackr-${VERSION}-macos-${ARCH}.tar.gz *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fackr-macos
+        path: fackr-*-macos-*.tar.gz
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: fackr-*-macos-*.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
