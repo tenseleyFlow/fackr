@@ -793,8 +793,8 @@ impl Editor {
             }
 
             self.prompt = PromptState::RenameModal {
-                original_name: current_word.clone(),
-                new_name: current_word,
+                original_name: current_word,
+                new_name: String::new(),
                 path: path_str,
                 line,
                 col,
