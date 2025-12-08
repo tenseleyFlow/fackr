@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use crate::buffer::Buffer;
 use crate::editor::{Cursors, History};
 use crate::fuss::FussMode;
+use crate::lsp::LspClient;
+use crate::syntax::Highlighter;
 
 /// Normalized pane bounds (0.0 to 1.0)
 /// Converted to screen coordinates at render time
@@ -43,6 +45,8 @@ pub struct BufferEntry {
     pub buffer: Buffer,
     /// Undo/redo history for this buffer
     pub history: History,
+    /// Syntax highlighter for this buffer
+    pub highlighter: Highlighter,
     /// File is outside workspace directory
     pub is_orphan: bool,
     /// Hash of buffer content at last save (None for new unsaved buffers)
@@ -60,6 +64,7 @@ impl BufferEntry {
             path: None,
             buffer,
             history: History::new(),
+            highlighter: Highlighter::new(),
             is_orphan: false,
             saved_hash,
             saved_len,
@@ -72,10 +77,18 @@ impl BufferEntry {
         let buffer = Buffer::from_str(content);
         let saved_hash = Some(buffer.content_hash());
         let saved_len = Some(buffer.len_chars());
+
+        // Detect language from display name for syntax highlighting
+        let mut highlighter = Highlighter::new();
+        if let Some(name) = display_name {
+            highlighter.detect_language(name);
+        }
+
         Self {
             path: display_name.map(PathBuf::from),
             buffer,
             history: History::new(),
+            highlighter,
             is_orphan: true, // Mark as orphan so path isn't prefixed with workspace root
             saved_hash,
             saved_len,
@@ -97,10 +110,17 @@ impl BufferEntry {
                 .to_path_buf()
         };
 
+        // Detect language for syntax highlighting
+        let mut highlighter = Highlighter::new();
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            highlighter.detect_language(filename);
+        }
+
         Ok(Self {
             path: Some(stored_path),
             buffer,
             history: History::new(),
+            highlighter,
             is_orphan,
             saved_hash,
             saved_len,
@@ -530,6 +550,8 @@ pub struct Workspace {
     pub fuss: FussMode,
     /// Workspace configuration
     pub config: WorkspaceConfig,
+    /// LSP client for language server support
+    pub lsp: LspClient,
 }
 
 impl Workspace {
@@ -537,12 +559,15 @@ impl Workspace {
     pub fn new(root: PathBuf) -> Self {
         let mut fuss = FussMode::new();
         fuss.init(&root);
+        let root_str = root.to_string_lossy().to_string();
+        let lsp = LspClient::new(&root_str);
         Self {
             root,
             tabs: vec![Tab::new()],
             active_tab: 0,
             fuss,
             config: WorkspaceConfig::default(),
+            lsp,
         }
     }
 
@@ -664,6 +689,19 @@ impl Workspace {
 
         // Open new tab
         let tab = Tab::from_file(path, &self.root)?;
+
+        // Notify LSP server of newly opened file
+        if let Some(file_path) = tab.path() {
+            let full_path = if tab.is_orphan() {
+                file_path.clone()
+            } else {
+                self.root.join(file_path)
+            };
+            let path_str = full_path.to_string_lossy();
+            let content = tab.buffers[0].buffer.contents();
+            let _ = self.lsp.open_document(&path_str, &content);
+        }
+
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         Ok(())
@@ -980,5 +1018,59 @@ impl Workspace {
     /// Check if this workspace is a git repository
     pub fn is_git_repo(&self) -> bool {
         self.root.join(".git").exists()
+    }
+
+    /// Find a tab by file path, returns tab index if found
+    pub fn find_tab_by_path(&self, path: &std::path::Path) -> Option<usize> {
+        for (tab_idx, tab) in self.tabs.iter().enumerate() {
+            for buffer_entry in &tab.buffers {
+                if let Some(buf_path) = &buffer_entry.path {
+                    // Get full path for comparison
+                    let full_path = if buffer_entry.is_orphan {
+                        buf_path.clone()
+                    } else {
+                        self.root.join(buf_path)
+                    };
+                    if full_path == path {
+                        return Some(tab_idx);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Apply a text edit to a buffer in a specific tab
+    pub fn apply_text_edit(&mut self, tab_idx: usize, edit: &crate::lsp::TextEdit) {
+        if tab_idx >= self.tabs.len() {
+            return;
+        }
+
+        let tab = &mut self.tabs[tab_idx];
+        if tab.buffers.is_empty() {
+            return;
+        }
+
+        let buffer = &mut tab.buffers[0].buffer;
+
+        // Convert LSP range to buffer char indices
+        let start_line = edit.range.start.line as usize;
+        let start_col = edit.range.start.character as usize;
+        let end_line = edit.range.end.line as usize;
+        let end_col = edit.range.end.character as usize;
+
+        let start_char = buffer.line_col_to_char(start_line, start_col);
+        let end_char = buffer.line_col_to_char(end_line, end_col);
+
+        // Delete the old text first (if range is non-empty)
+        if start_char < end_char {
+            buffer.delete(start_char, end_char);
+        }
+
+        // Insert the new text at start position
+        if !edit.new_text.is_empty() {
+            buffer.insert(start_char, &edit.new_text);
+        }
+        // Buffer automatically tracks modifications via content hash
     }
 }

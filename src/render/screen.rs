@@ -6,14 +6,17 @@ use crossterm::{
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::io::{stdout, Stdout, Write};
+use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::Buffer;
 use crate::editor::{Cursors, Position};
 use crate::fuss::VisibleItem;
+use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, ServerManagerPanel};
+use crate::syntax::{Highlighter, HighlightState, Token};
 
 // Editor color scheme (256-color palette)
 const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
@@ -120,6 +123,13 @@ impl Screen {
         let (cols, rows) = terminal::size()?;
         self.cols = cols;
         self.rows = rows;
+        Ok(())
+    }
+
+    /// Position and show the hardware cursor at the given screen coordinates
+    pub fn show_cursor_at(&mut self, col: u16, row: u16) -> Result<()> {
+        execute!(self.stdout, MoveTo(col, row), Show)?;
+        self.stdout.flush()?;
         Ok(())
     }
 
@@ -528,8 +538,8 @@ impl Screen {
             .map(|(i, c)| (c.line, c.col, i == primary_idx)) // (line, col, is_primary)
             .collect();
 
-        // Reserve 1 row for status bar
-        let text_rows = self.rows.saturating_sub(1) as usize;
+        // Reserve 2 rows: 1 for gap above status bar, 1 for status bar itself
+        let text_rows = self.rows.saturating_sub(2) as usize;
 
         // Draw text area
         for row in 0..text_rows {
@@ -597,6 +607,16 @@ impl Screen {
             }
         }
 
+        // Render the gap row (empty line between text and status bar)
+        let gap_row = text_rows as u16;
+        execute!(
+            self.stdout,
+            MoveTo(0, gap_row),
+            SetBackgroundColor(BG_COLOR),
+            Clear(ClearType::UntilNewLine),
+            ResetColor
+        )?;
+
         // Status bar
         self.render_status_bar(buffer, cursors, filename, message)?;
 
@@ -623,6 +643,30 @@ impl Screen {
         bracket_col: Option<usize>,
         secondary_cursors: &[usize],
     ) -> Result<()> {
+        // Call the syntax-aware version with no tokens
+        self.render_line_with_syntax(
+            line,
+            line_idx,
+            max_cols,
+            selections,
+            is_current_line,
+            bracket_col,
+            secondary_cursors,
+            &[],
+        )
+    }
+
+    fn render_line_with_syntax(
+        &mut self,
+        line: &str,
+        line_idx: usize,
+        max_cols: usize,
+        selections: &[(Position, Position)],
+        is_current_line: bool,
+        bracket_col: Option<usize>,
+        secondary_cursors: &[usize],
+        tokens: &[Token],
+    ) -> Result<()> {
         let chars: Vec<char> = line.chars().take(max_cols).collect();
         let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
         let default_fg = Color::Reset; // Default terminal foreground
@@ -639,45 +683,63 @@ impl Screen {
             }
         }
 
+        // Helper to find token at character position
+        let get_token_at = |col: usize| -> Option<&Token> {
+            tokens.iter().find(|t| col >= t.start && col < t.end)
+        };
+
         // Render character by character for precise highlighting
         for (col, ch) in chars.iter().enumerate() {
             let in_selection = sel_ranges.iter().any(|(s, e)| col >= *s && col < *e);
             let is_bracket_match = bracket_col == Some(col);
             let is_secondary_cursor = secondary_cursors.contains(&col);
 
-            // Determine background color
+            // Determine background color (priority: selection > cursor > bracket > syntax/line)
             let bg = if in_selection {
                 Color::Blue
             } else if is_secondary_cursor {
-                Color::Magenta  // Use magenta for better visibility
+                Color::Magenta
             } else if is_bracket_match {
                 BRACKET_MATCH_BG
             } else {
                 line_bg
             };
 
-            // Determine foreground color
-            let fg = if in_selection {
-                Color::White
+            // Determine foreground color and boldness
+            let (fg, bold) = if in_selection {
+                (Color::White, false)
             } else if is_secondary_cursor {
-                Color::White  // White text on magenta bg
+                (Color::White, false)
+            } else if let Some(token) = get_token_at(col) {
+                (token.token_type.color(), token.token_type.bold())
             } else {
-                default_fg
+                (default_fg, false)
             };
 
-            execute!(
-                self.stdout,
-                SetBackgroundColor(bg),
-                SetForegroundColor(fg),
-                Print(ch)
-            )?;
+            // Apply styling
+            if bold {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(bg),
+                    SetForegroundColor(fg),
+                    SetAttribute(Attribute::Bold),
+                    Print(ch),
+                    SetAttribute(Attribute::NoBold),
+                )?;
+            } else {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(bg),
+                    SetForegroundColor(fg),
+                    Print(ch)
+                )?;
+            }
         }
 
         // Reset to line background for rest of line
         execute!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
 
         // Handle secondary cursors at end of line (past text content)
-        // Find the rightmost secondary cursor past text
         let max_cursor_past_text = secondary_cursors.iter()
             .filter(|&&c| c >= chars.len())
             .max()
@@ -685,7 +747,6 @@ impl Screen {
 
         if let Some(max_cursor) = max_cursor_past_text {
             if max_cursor < max_cols {
-                // Fill spaces up to and including the cursor positions
                 for col in chars.len()..=max_cursor {
                     if secondary_cursors.contains(&col) {
                         execute!(
@@ -702,7 +763,6 @@ impl Screen {
                         )?;
                     }
                 }
-                // Reset for the rest of the line
                 execute!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
             }
         }
@@ -762,7 +822,7 @@ impl Screen {
         Ok(())
     }
 
-    fn line_number_width(&self, line_count: usize) -> usize {
+    pub fn line_number_width(&self, line_count: usize) -> usize {
         let digits = if line_count == 0 {
             1
         } else {
@@ -992,6 +1052,7 @@ impl Screen {
     }
 
     /// Render the editor view with horizontal and vertical offsets (for fuss mode and tab bar)
+    #[allow(dead_code)]
     pub fn render_with_offset(
         &mut self,
         buffer: &Buffer,
@@ -1028,8 +1089,8 @@ impl Screen {
             .map(|(i, c)| (c.line, c.col, i == primary_idx))
             .collect();
 
-        // Reserve 1 row for status bar, accounting for top offset
-        let text_rows = self.rows.saturating_sub(1 + top_offset) as usize;
+        // Reserve 2 rows: 1 for gap above status bar, 1 for status bar itself
+        let text_rows = self.rows.saturating_sub(2 + top_offset) as usize;
 
         // Draw text area
         for row in 0..text_rows {
@@ -1091,12 +1152,191 @@ impl Screen {
             }
         }
 
+        // Render the gap row (empty line between text and status bar)
+        let gap_row = text_rows as u16 + top_offset;
+        execute!(
+            self.stdout,
+            MoveTo(left_offset, gap_row),
+            SetBackgroundColor(BG_COLOR),
+            Clear(ClearType::UntilNewLine),
+            ResetColor
+        )?;
+
         // Status bar
         self.render_status_bar_with_offset(cursors, filename, message, left_offset, is_modified)?;
 
         // Position hardware cursor at primary cursor
         let cursor_row = (primary.line.saturating_sub(viewport_line) as u16) + top_offset;
         let cursor_col = left_offset as usize + line_num_width + 1 + primary.col;
+        execute!(
+            self.stdout,
+            MoveTo(cursor_col as u16, cursor_row),
+            Show
+        )?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    /// Render the editor view with syntax highlighting
+    pub fn render_with_syntax(
+        &mut self,
+        buffer: &Buffer,
+        cursors: &Cursors,
+        viewport_line: usize,
+        viewport_col: usize,
+        filename: Option<&str>,
+        message: Option<&str>,
+        bracket_match: Option<(usize, usize)>,
+        left_offset: u16,
+        top_offset: u16,
+        is_modified: bool,
+        highlighter: &Highlighter,
+    ) -> Result<()> {
+        execute!(self.stdout, Hide)?;
+
+        let available_cols = self.cols.saturating_sub(left_offset) as usize;
+        let line_num_width = self.line_number_width(buffer.line_count());
+        let text_cols = available_cols.saturating_sub(line_num_width + 1);
+
+        let primary = cursors.primary();
+
+        // Adjust selections for horizontal scroll
+        let selections: Vec<(Position, Position)> = cursors.all()
+            .iter()
+            .filter_map(|c| c.selection_bounds())
+            .map(|(start, end)| {
+                (
+                    Position { line: start.line, col: start.col.saturating_sub(viewport_col) },
+                    Position { line: end.line, col: end.col.saturating_sub(viewport_col) },
+                )
+            })
+            .collect();
+
+        let primary_idx = cursors.primary_index();
+        // Adjust cursor positions for horizontal scroll
+        let cursor_positions: Vec<(usize, usize, bool)> = cursors.all()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.line, c.col.saturating_sub(viewport_col), i == primary_idx))
+            .collect();
+
+        // Reserve 2 rows: 1 for gap above status bar, 1 for status bar itself
+        let text_rows = self.rows.saturating_sub(2 + top_offset) as usize;
+
+        // Track multiline state across lines
+        let mut highlight_state = HighlightState::default();
+
+        // Pre-tokenize lines from start of buffer to viewport for correct multiline state
+        // (In a production system, we'd cache this state per line)
+        for line_idx in 0..viewport_line {
+            if let Some(line) = buffer.line_str(line_idx) {
+                let _ = highlighter.tokenize_line(&line, &mut highlight_state);
+            }
+        }
+
+        // Draw text area with syntax highlighting
+        for row in 0..text_rows {
+            let line_idx = viewport_line + row;
+            let is_current_line = line_idx == primary.line;
+            execute!(self.stdout, MoveTo(left_offset, (row as u16) + top_offset))?;
+
+            if line_idx < buffer.line_count() {
+                let line_num_fg = if is_current_line {
+                    CURRENT_LINE_NUM_COLOR
+                } else {
+                    LINE_NUM_COLOR
+                };
+                let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
+
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    SetForegroundColor(line_num_fg),
+                    Print(format!("{:>width$} ", line_idx + 1, width = line_num_width)),
+                )?;
+
+                if let Some(line) = buffer.line_str(line_idx) {
+                    // Tokenize this line
+                    let tokens = highlighter.tokenize_line(&line, &mut highlight_state);
+
+                    // Apply horizontal scroll to bracket match column
+                    // Only show if the bracket is in the visible area
+                    let bracket_col = bracket_match
+                        .filter(|(bl, bc)| *bl == line_idx && *bc >= viewport_col)
+                        .map(|(_, bc)| bc - viewport_col);
+
+                    let secondary_cursors: Vec<usize> = cursor_positions.iter()
+                        .filter(|(l, _, is_primary)| *l == line_idx && !*is_primary)
+                        .map(|(_, c, _)| *c)
+                        .collect();
+
+                    // Skip characters before viewport_col
+                    let display_line: String = line.chars().skip(viewport_col).collect();
+
+                    // Adjust tokens for horizontal scroll
+                    let adjusted_tokens: Vec<Token> = tokens.iter()
+                        .filter_map(|t| {
+                            let new_start = t.start.saturating_sub(viewport_col);
+                            let new_end = t.end.saturating_sub(viewport_col);
+                            if t.end <= viewport_col {
+                                None // Token is entirely before viewport
+                            } else {
+                                Some(Token {
+                                    start: new_start,
+                                    end: new_end,
+                                    token_type: t.token_type,
+                                })
+                            }
+                        })
+                        .collect();
+
+                    self.render_line_with_syntax(
+                        &display_line,
+                        line_idx,
+                        text_cols,
+                        &selections,
+                        is_current_line,
+                        bracket_col,
+                        &secondary_cursors,
+                        &adjusted_tokens,
+                    )?;
+                }
+
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(line_bg),
+                    Clear(ClearType::UntilNewLine),
+                    ResetColor
+                )?;
+            } else {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(BG_COLOR),
+                    SetForegroundColor(Color::DarkBlue),
+                    Print(format!("{:>width$} ", "~", width = line_num_width)),
+                    Clear(ClearType::UntilNewLine),
+                    ResetColor
+                )?;
+            }
+        }
+
+        // Render the gap row (empty line between text and status bar)
+        let gap_row = text_rows as u16 + top_offset;
+        execute!(
+            self.stdout,
+            MoveTo(left_offset, gap_row),
+            SetBackgroundColor(BG_COLOR),
+            Clear(ClearType::UntilNewLine),
+            ResetColor
+        )?;
+
+        // Status bar
+        self.render_status_bar_with_offset(cursors, filename, message, left_offset, is_modified)?;
+
+        // Position hardware cursor (adjusted for horizontal scroll)
+        let cursor_row = (primary.line.saturating_sub(viewport_line) as u16) + top_offset;
+        let cursor_col = left_offset as usize + line_num_width + 1 + primary.col.saturating_sub(viewport_col);
         execute!(
             self.stdout,
             MoveTo(cursor_col as u16, cursor_row),
@@ -1375,6 +1615,828 @@ impl Screen {
         )?;
 
         self.stdout.flush()?;
+        Ok(())
+    }
+
+    /// Render a completion popup at the given screen position
+    pub fn render_completion_popup(
+        &mut self,
+        completions: &[CompletionItem],
+        selected_index: usize,
+        cursor_row: u16,
+        cursor_col: u16,
+        left_offset: u16,
+    ) -> Result<()> {
+        if completions.is_empty() {
+            return Ok(());
+        }
+
+        // Popup settings
+        let max_items = 10.min(completions.len());
+        let popup_width = 40;
+        let popup_bg = Color::AnsiValue(237);
+        let selected_bg = Color::AnsiValue(24);
+        let item_fg = Color::AnsiValue(252);
+        let detail_fg = Color::AnsiValue(244);
+
+        // Position popup below cursor, or above if not enough space
+        let popup_row = if cursor_row + (max_items as u16) + 2 < self.rows {
+            cursor_row + 1
+        } else {
+            cursor_row.saturating_sub(max_items as u16 + 1)
+        };
+
+        let popup_col = (cursor_col + left_offset).min(self.cols.saturating_sub(popup_width as u16));
+
+        // Calculate scroll offset to keep selection visible
+        let scroll_offset = if selected_index >= max_items {
+            selected_index - max_items + 1
+        } else {
+            0
+        };
+
+        // Draw border and items
+        for (i, item) in completions.iter().skip(scroll_offset).take(max_items).enumerate() {
+            let row = popup_row + i as u16;
+            let is_selected = i + scroll_offset == selected_index;
+            let bg = if is_selected { selected_bg } else { popup_bg };
+
+            execute!(
+                self.stdout,
+                MoveTo(popup_col, row),
+                SetBackgroundColor(bg),
+                SetForegroundColor(item_fg),
+            )?;
+
+            // Format: [icon] label   detail
+            let icon = item.kind.map(|k| k.icon()).unwrap_or(" ");
+            let label = &item.label;
+            let detail = item.detail.as_deref().unwrap_or("");
+
+            let label_width = popup_width - 4;
+            let truncated_label: String = if label.len() > label_width - 2 {
+                format!("{}...", &label[..label_width - 5])
+            } else {
+                label.clone()
+            };
+
+            write!(self.stdout, " {} ", icon)?;
+            write!(self.stdout, "{:<width$}", truncated_label, width = label_width - detail.len().min(15))?;
+
+            if !detail.is_empty() {
+                execute!(self.stdout, SetForegroundColor(detail_fg))?;
+                let truncated_detail: String = if detail.len() > 12 {
+                    format!("{}...", &detail[..9])
+                } else {
+                    detail.to_string()
+                };
+                write!(self.stdout, "{}", truncated_detail)?;
+            }
+
+            // Clear to popup width
+            execute!(self.stdout, ResetColor)?;
+        }
+
+        // Show scroll indicator if needed
+        if completions.len() > max_items {
+            let indicator_row = popup_row + max_items as u16;
+            execute!(
+                self.stdout,
+                MoveTo(popup_col, indicator_row),
+                SetBackgroundColor(popup_bg),
+                SetForegroundColor(detail_fg),
+                Print(format!(" {}/{} items ", selected_index + 1, completions.len())),
+                ResetColor,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Render diagnostics in the gutter or inline
+    pub fn render_diagnostics_gutter(
+        &mut self,
+        diagnostics: &[Diagnostic],
+        viewport_line: usize,
+        left_offset: u16,
+        top_offset: u16,
+    ) -> Result<()> {
+        // Match text_rows calculation from render functions
+        let text_rows = self.rows.saturating_sub(2 + top_offset) as usize;
+
+        for diagnostic in diagnostics {
+            let line = diagnostic.range.start.line as usize;
+
+            // Only render if in visible viewport
+            if line >= viewport_line && line < viewport_line + text_rows {
+                let row = (line - viewport_line) as u16 + top_offset;
+
+                // Determine color based on severity
+                let color = match diagnostic.severity {
+                    Some(DiagnosticSeverity::Error) => Color::Red,
+                    Some(DiagnosticSeverity::Warning) => Color::Yellow,
+                    Some(DiagnosticSeverity::Information) => Color::Blue,
+                    Some(DiagnosticSeverity::Hint) => Color::Cyan,
+                    None => Color::Yellow,
+                };
+
+                // Draw indicator at the start of the line (before line number)
+                execute!(
+                    self.stdout,
+                    MoveTo(left_offset, row),
+                    SetForegroundColor(color),
+                    Print("●"),
+                    ResetColor,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Render a hover info popup at the given screen position
+    pub fn render_hover_popup(
+        &mut self,
+        hover: &HoverInfo,
+        cursor_row: u16,
+        cursor_col: u16,
+        left_offset: u16,
+    ) -> Result<()> {
+        let (width, height) = (self.cols, self.rows);
+
+        // Split content into lines
+        let lines: Vec<&str> = hover.contents.lines().collect();
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        // Calculate popup dimensions
+        let max_popup_width = (width as usize).saturating_sub(left_offset as usize + 4).min(80);
+        let popup_width = lines
+            .iter()
+            .map(|l| l.len().min(max_popup_width))
+            .max()
+            .unwrap_or(20)
+            .max(20);
+        let max_popup_height = (height as usize).saturating_sub(4).min(15);
+        let popup_height = lines.len().min(max_popup_height);
+
+        // Determine position - prefer above cursor, but go below if needed
+        let (popup_row, show_above) = if cursor_row as usize >= popup_height + 2 {
+            (cursor_row.saturating_sub(popup_height as u16 + 1), true)
+        } else {
+            (cursor_row + 1, false)
+        };
+
+        let popup_col = cursor_col.max(left_offset);
+
+        // Ensure popup fits on screen
+        let popup_col = if popup_col as usize + popup_width + 2 > width as usize {
+            (width as usize).saturating_sub(popup_width + 3) as u16
+        } else {
+            popup_col
+        };
+
+        // Draw popup border and content
+        for (i, line) in lines.iter().take(popup_height).enumerate() {
+            let row = popup_row + i as u16;
+
+            // Background and border
+            execute!(
+                self.stdout,
+                MoveTo(popup_col, row),
+                SetBackgroundColor(Color::AnsiValue(238)),
+                SetForegroundColor(Color::White),
+            )?;
+
+            // Truncate line if needed
+            let display_line: String = if line.len() > popup_width {
+                format!(" {}... ", &line[..popup_width.saturating_sub(4)])
+            } else {
+                format!(" {:width$} ", line, width = popup_width)
+            };
+
+            execute!(self.stdout, Print(&display_line), ResetColor)?;
+        }
+
+        // Show indicator if content is truncated
+        if lines.len() > popup_height {
+            let row = popup_row + popup_height as u16;
+            execute!(
+                self.stdout,
+                MoveTo(popup_col, row),
+                SetBackgroundColor(Color::AnsiValue(238)),
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!(" [{} more lines] ", lines.len() - popup_height)),
+                ResetColor
+            )?;
+        }
+
+        // Hide cursor position indicator
+        let _ = show_above; // suppress unused warning
+
+        Ok(())
+    }
+
+    /// Render the LSP server manager panel
+    pub fn render_server_manager_panel(&mut self, panel: &ServerManagerPanel) -> Result<()> {
+        if !panel.visible {
+            return Ok(());
+        }
+
+        let (width, height) = (self.cols, self.rows);
+        let panel_width = 64.min(width as usize - 4);
+        let max_visible = 10.min(height as usize - 8);
+
+        // Center the panel
+        let start_col = ((width as usize).saturating_sub(panel_width)) / 2;
+        let start_row = 2u16;
+
+        // Draw confirm dialog if in confirm mode
+        if panel.confirm_mode {
+            self.render_server_install_confirm(panel, start_col, start_row + 4)?;
+            return Ok(());
+        }
+
+        // Draw manual install info dialog
+        if panel.manual_info_mode {
+            self.render_manual_install_info(panel, start_col, start_row + 4)?;
+            return Ok(());
+        }
+
+        // Top border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row),
+            SetForegroundColor(Color::Cyan),
+            Print("┌"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┐"),
+            ResetColor
+        )?;
+
+        // Header
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 1),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetForegroundColor(Color::Cyan),
+            SetAttribute(Attribute::Bold),
+            Print(" Language Server Manager"),
+            SetAttribute(Attribute::Reset),
+            SetForegroundColor(Color::DarkGrey),
+        )?;
+        let header_len = 25;
+        let padding = panel_width - header_len - 7;
+        execute!(
+            self.stdout,
+            Print(" ".repeat(padding)),
+            Print("Alt+M"),
+            SetForegroundColor(Color::Cyan),
+            Print(" │"),
+            ResetColor
+        )?;
+
+        // Header separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 2),
+            SetForegroundColor(Color::Cyan),
+            Print("├"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┤"),
+            ResetColor
+        )?;
+
+        // Server list
+        let visible_end = (panel.scroll_offset + max_visible).min(panel.servers.len());
+        for (i, idx) in (panel.scroll_offset..visible_end).enumerate() {
+            let server = &panel.servers[idx];
+            let row = start_row + 3 + i as u16;
+            let is_selected = idx == panel.selected_index;
+
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+            )?;
+
+            // Highlight selected row
+            if is_selected {
+                execute!(self.stdout, SetAttribute(Attribute::Reverse))?;
+            }
+
+            // Status icon
+            execute!(self.stdout, Print(" "))?;
+            if server.is_installed {
+                execute!(
+                    self.stdout,
+                    SetForegroundColor(Color::Green),
+                    Print("✓"),
+                )?;
+            } else {
+                execute!(
+                    self.stdout,
+                    SetForegroundColor(Color::Red),
+                    Print("✗"),
+                )?;
+            }
+
+            // Server name and language (or "Installing..." if being installed)
+            let is_installing = panel.is_installing(idx);
+            let name_lang = if is_installing {
+                " Installing...".to_string()
+            } else {
+                format!(" {} ({})", server.name, server.language)
+            };
+            let name_len = name_lang.len().min(panel_width - 20);
+            execute!(
+                self.stdout,
+                SetForegroundColor(if is_installing { Color::Yellow } else { Color::White }),
+                Print(&name_lang[..name_len]),
+            )?;
+
+            // Status text
+            let status = if is_installing {
+                ""
+            } else if server.is_installed {
+                "installed"
+            } else if server.install_cmd.starts_with('#') {
+                "manual"
+            } else {
+                "Enter to install"
+            };
+            // Content width is panel_width - 2 (for the two │ borders)
+            // We've printed: 1 space + 1 icon + name_len chars
+            // We need to print: status + 1 trailing space before │
+            let used = 1 + 1 + name_len + status.len() + 1;
+            let content_width = panel_width - 2;
+            let status_padding = content_width.saturating_sub(used);
+            execute!(self.stdout, Print(" ".repeat(status_padding)))?;
+
+            if server.is_installed {
+                execute!(
+                    self.stdout,
+                    SetForegroundColor(Color::DarkGrey),
+                    Print(status),
+                )?;
+            } else {
+                execute!(
+                    self.stdout,
+                    SetForegroundColor(Color::Yellow),
+                    Print(status),
+                )?;
+            }
+
+            if is_selected {
+                execute!(self.stdout, SetAttribute(Attribute::Reset))?;
+            }
+
+            execute!(
+                self.stdout,
+                Print(" "),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+                ResetColor
+            )?;
+        }
+
+        // Fill remaining rows
+        for i in (visible_end - panel.scroll_offset)..max_visible {
+            let row = start_row + 3 + i as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+                Print(" ".repeat(panel_width - 2)),
+                Print("│"),
+                ResetColor
+            )?;
+        }
+
+        // Footer separator
+        let footer_row = start_row + 3 + max_visible as u16;
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, footer_row),
+            SetForegroundColor(Color::Cyan),
+            Print("├"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┤"),
+            ResetColor
+        )?;
+
+        // Status or help
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, footer_row + 1),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+        )?;
+
+        if let Some(ref msg) = panel.status_message {
+            let content_width = panel_width - 2;
+            let msg_width = msg.width();
+            // Truncate if needed (simple truncation, could be smarter)
+            let msg_display = if msg_width > content_width - 2 {
+                // Find a safe truncation point
+                let mut truncated = String::new();
+                let mut w = 0;
+                for c in msg.chars() {
+                    let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                    if w + cw > content_width - 5 {
+                        break;
+                    }
+                    truncated.push(c);
+                    w += cw;
+                }
+                truncated.push_str("...");
+                truncated
+            } else {
+                msg.clone()
+            };
+            let display_width = msg_display.width();
+            execute!(
+                self.stdout,
+                SetForegroundColor(Color::Yellow),
+                Print(format!(" {}", msg_display)),
+            )?;
+            // We printed 1 space + msg_display, need to fill to content_width
+            let pad = content_width.saturating_sub(1 + display_width);
+            execute!(self.stdout, Print(" ".repeat(pad)))?;
+        } else {
+            let help_text = " ↑↓ Navigate  Enter Install  r Refresh  Esc Close ";
+            let help_width = help_text.width();
+            execute!(
+                self.stdout,
+                SetForegroundColor(Color::DarkGrey),
+                Print(help_text),
+            )?;
+            // Content width is panel_width - 2 (for borders)
+            let content_width = panel_width - 2;
+            let pad = content_width.saturating_sub(help_width);
+            execute!(self.stdout, Print(" ".repeat(pad)))?;
+        }
+
+        execute!(
+            self.stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, footer_row + 2),
+            SetForegroundColor(Color::Cyan),
+            Print("└"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┘"),
+            ResetColor
+        )?;
+
+        Ok(())
+    }
+
+    /// Render the install confirmation dialog
+    fn render_server_install_confirm(
+        &mut self,
+        panel: &ServerManagerPanel,
+        start_col: usize,
+        start_row: u16,
+    ) -> Result<()> {
+        let panel_width = 60;
+
+        let server = match panel.confirm_server() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Top border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row),
+            SetForegroundColor(Color::Cyan),
+            Print("┌"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┐"),
+            ResetColor
+        )?;
+
+        // Title
+        let title = format!(" Install {}? ", server.name);
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 1),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetAttribute(Attribute::Bold),
+            Print(&title),
+            SetAttribute(Attribute::Reset),
+        )?;
+        let pad = panel_width - 2 - title.len();
+        execute!(
+            self.stdout,
+            Print(" ".repeat(pad)),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Blank line
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 2),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            Print(" ".repeat(panel_width - 2)),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Command
+        let cmd_display = if server.install_cmd.len() > panel_width - 14 {
+            format!("{}...", &server.install_cmd[..panel_width - 17])
+        } else {
+            server.install_cmd.to_string()
+        };
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 3),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetForegroundColor(Color::White),
+            Print(" Command: "),
+            SetForegroundColor(Color::Yellow),
+            Print(&cmd_display),
+        )?;
+        let pad = panel_width - 12 - cmd_display.len();
+        execute!(
+            self.stdout,
+            Print(" ".repeat(pad)),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Blank line
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 4),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            Print(" ".repeat(panel_width - 2)),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Buttons
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 5),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+        )?;
+        let button_text = "[Y]es    [N]o";
+        let button_pad = (panel_width - 2 - button_text.len()) / 2;
+        execute!(
+            self.stdout,
+            Print(" ".repeat(button_pad)),
+            Print("["),
+            SetForegroundColor(Color::Green),
+            Print("Y"),
+            SetForegroundColor(Color::White),
+            Print("]es    ["),
+            SetForegroundColor(Color::Red),
+            Print("N"),
+            SetForegroundColor(Color::White),
+            Print("]o"),
+            Print(" ".repeat(panel_width - 2 - button_pad - button_text.len())),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 6),
+            SetForegroundColor(Color::Cyan),
+            Print("└"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┘"),
+            ResetColor
+        )?;
+
+        Ok(())
+    }
+
+    /// Render the manual install info dialog
+    fn render_manual_install_info(
+        &mut self,
+        panel: &ServerManagerPanel,
+        start_col: usize,
+        start_row: u16,
+    ) -> Result<()> {
+        let panel_width = 60;
+
+        let server = match panel.manual_info_server() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Parse the install instructions (remove leading #)
+        let instructions = server.install_cmd.trim_start_matches('#').trim();
+
+        // Top border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row),
+            SetForegroundColor(Color::Cyan),
+            Print("┌"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┐"),
+            ResetColor
+        )?;
+
+        // Title
+        let title = format!(" {} - Manual Installation ", server.name);
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 1),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetAttribute(Attribute::Bold),
+            SetForegroundColor(Color::Yellow),
+            Print(&title),
+            SetAttribute(Attribute::Reset),
+        )?;
+        let pad = panel_width - 2 - title.len();
+        execute!(
+            self.stdout,
+            Print(" ".repeat(pad)),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 2),
+            SetForegroundColor(Color::Cyan),
+            Print("├"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┤"),
+            ResetColor
+        )?;
+
+        // Language
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 3),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetForegroundColor(Color::White),
+            Print(" Language: "),
+            SetForegroundColor(Color::Green),
+            Print(server.language),
+        )?;
+        let lang_pad = panel_width - 13 - server.language.len();
+        execute!(
+            self.stdout,
+            Print(" ".repeat(lang_pad)),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Blank line
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 4),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            Print(" ".repeat(panel_width - 2)),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Instructions label
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 5),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            SetForegroundColor(Color::White),
+            Print(" Installation:"),
+        )?;
+        execute!(
+            self.stdout,
+            Print(" ".repeat(panel_width - 16)),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Instructions text (may be multi-line, show up to 3 lines)
+        let instr_lines: Vec<&str> = instructions.lines().collect();
+        for (i, line) in instr_lines.iter().take(3).enumerate() {
+            let row = start_row + 6 + i as u16;
+            let display_line = if line.len() > panel_width - 6 {
+                format!("{}...", &line[..panel_width - 9])
+            } else {
+                line.to_string()
+            };
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+                SetForegroundColor(Color::Yellow),
+                Print(format!("   {}", display_line)),
+            )?;
+            let line_pad = panel_width - 5 - display_line.len();
+            execute!(
+                self.stdout,
+                Print(" ".repeat(line_pad)),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+                ResetColor
+            )?;
+        }
+
+        // Fill remaining instruction lines if less than 3
+        for i in instr_lines.len()..3 {
+            let row = start_row + 6 + i as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetForegroundColor(Color::Cyan),
+                Print("│"),
+                Print(" ".repeat(panel_width - 2)),
+                Print("│"),
+                ResetColor
+            )?;
+        }
+
+        // Blank line
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 9),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            Print(" ".repeat(panel_width - 2)),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Status or help line
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 10),
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+        )?;
+
+        if panel.copied_to_clipboard {
+            execute!(
+                self.stdout,
+                SetForegroundColor(Color::Green),
+                Print(" ✓ Copied to clipboard!"),
+            )?;
+            execute!(self.stdout, Print(" ".repeat(panel_width - 26)))?;
+        } else {
+            execute!(
+                self.stdout,
+                SetForegroundColor(Color::DarkGrey),
+                Print(" [C] Copy to clipboard  [Esc] Close"),
+            )?;
+            execute!(self.stdout, Print(" ".repeat(panel_width - 38)))?;
+        }
+
+        execute!(
+            self.stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("│"),
+            ResetColor
+        )?;
+
+        // Bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 11),
+            SetForegroundColor(Color::Cyan),
+            Print("└"),
+            Print("─".repeat(panel_width - 2)),
+            Print("┘"),
+            ResetColor
+        )?;
+
         Ok(())
     }
 }

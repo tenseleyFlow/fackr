@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::Buffer;
 use crate::input::{Key, Modifiers, Mouse, Button};
+use crate::lsp::{CompletionItem, Diagnostic, HoverInfo, Location, ServerManagerPanel};
 use crate::render::{PaneBounds as RenderPaneBounds, PaneInfo, Screen, TabInfo};
 use crate::workspace::{PaneDirection, Tab, Workspace};
 
@@ -34,6 +35,36 @@ enum TextInputAction {
     GitCommit,
     /// Create a git tag
     GitTag,
+    /// LSP rename symbol
+    LspRename { path: String, line: u32, col: u32 },
+}
+
+/// LSP UI state
+#[derive(Debug, Default)]
+struct LspState {
+    /// Current hover information to display
+    hover: Option<HoverInfo>,
+    /// Whether hover popup is visible
+    hover_visible: bool,
+    /// Current completion list
+    completions: Vec<CompletionItem>,
+    /// Selected completion index
+    completion_index: usize,
+    /// Whether completion popup is visible
+    completion_visible: bool,
+    /// Current diagnostics for the active file
+    diagnostics: Vec<Diagnostic>,
+    /// Go-to-definition results (for multi-result navigation)
+    definition_locations: Vec<Location>,
+    /// Pending request IDs (to match responses)
+    pending_hover: Option<i64>,
+    pending_completion: Option<i64>,
+    pending_definition: Option<i64>,
+    pending_references: Option<i64>,
+    /// Last known buffer hash (to detect changes)
+    last_buffer_hash: Option<u64>,
+    /// Last file path that was synced to LSP
+    last_synced_path: Option<PathBuf>,
 }
 
 /// Main editor state
@@ -56,6 +87,10 @@ pub struct Editor {
     prompt: PromptState,
     /// Last time we wrote backups
     last_backup: Instant,
+    /// LSP-related UI state
+    lsp_state: LspState,
+    /// LSP server manager panel
+    server_manager: ServerManagerPanel,
 }
 
 impl Editor {
@@ -97,6 +132,8 @@ impl Editor {
             escape_time,
             prompt: PromptState::None,
             last_backup: Instant::now(),
+            lsp_state: LspState::default(),
+            server_manager: ServerManagerPanel::new(),
         };
 
         // If there are backups, show restore prompt
@@ -208,6 +245,21 @@ impl Editor {
         tab.panes[pane_idx].viewport_line = line;
     }
 
+    /// Get current viewport column (horizontal scroll offset)
+    #[inline]
+    fn viewport_col(&self) -> usize {
+        let tab = self.workspace.active_tab();
+        tab.panes[tab.active_pane].viewport_col
+    }
+
+    /// Set current viewport column (horizontal scroll offset)
+    #[inline]
+    fn set_viewport_col(&mut self, col: usize) {
+        let tab = self.workspace.active_tab_mut();
+        let pane_idx = tab.active_pane;
+        tab.panes[pane_idx].viewport_col = col;
+    }
+
     /// Get current filename
     #[inline]
     fn filename(&self) -> Option<PathBuf> {
@@ -222,19 +274,12 @@ impl Editor {
         self.render()?;
 
         while self.running {
-            // Block until an event is available (no busy polling)
-            match event::read()? {
-                Event::Key(key_event) => self.process_key(key_event)?,
-                Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
-                Event::Resize(cols, rows) => {
-                    self.screen.cols = cols;
-                    self.screen.rows = rows;
-                }
-                _ => {}
-            }
+            // Track whether we need to re-render
+            let mut needs_render = false;
 
-            // Process any additional queued events before rendering
-            while event::poll(Duration::from_millis(0))? {
+            // Poll with a short timeout to allow LSP processing
+            // This balances responsiveness with CPU usage
+            if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(key_event) => self.process_key(key_event)?,
                     Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
@@ -244,14 +289,40 @@ impl Editor {
                     }
                     _ => {}
                 }
+                needs_render = true;
+
+                // Process any additional queued events before rendering
+                while event::poll(Duration::from_millis(0))? {
+                    match event::read()? {
+                        Event::Key(key_event) => self.process_key(key_event)?,
+                        Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
+                        Event::Resize(cols, rows) => {
+                            self.screen.cols = cols;
+                            self.screen.rows = rows;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Process LSP messages from language servers
+            if self.process_lsp_messages() {
+                needs_render = true;
+            }
+
+            // Poll for completed server installations
+            if self.server_manager.poll_installs() {
+                needs_render = true;
             }
 
             // Check if it's time to backup modified buffers
             self.maybe_backup();
 
-            // Only render after processing events
-            self.screen.refresh_size()?;
-            self.render()?;
+            // Only render if something changed
+            if needs_render {
+                self.screen.refresh_size()?;
+                self.render()?;
+            }
         }
 
         self.screen.leave_raw_mode()?;
@@ -266,6 +337,518 @@ impl Editor {
             }
             self.last_backup = Instant::now();
         }
+    }
+
+    /// Process LSP messages. Returns true if any messages were processed.
+    fn process_lsp_messages(&mut self) -> bool {
+        use crate::lsp::LspResponse;
+
+        // Process pending messages from language servers
+        self.workspace.lsp.process_messages();
+
+        let mut had_response = false;
+
+        // Handle any responses that came in
+        while let Some(response) = self.workspace.lsp.poll_response() {
+            had_response = true;
+            match response {
+                LspResponse::Completions(id, items) => {
+                    if self.lsp_state.pending_completion == Some(id) {
+                        self.lsp_state.completions = items;
+                        self.lsp_state.completion_index = 0;
+                        self.lsp_state.completion_visible = !self.lsp_state.completions.is_empty();
+                        self.lsp_state.pending_completion = None;
+                    }
+                }
+                LspResponse::Hover(id, info) => {
+                    if self.lsp_state.pending_hover == Some(id) {
+                        self.lsp_state.hover = info;
+                        self.lsp_state.hover_visible = self.lsp_state.hover.is_some();
+                        self.lsp_state.pending_hover = None;
+                        if self.lsp_state.hover.is_none() {
+                            self.message = Some("No hover info available".to_string());
+                        }
+                    }
+                }
+                LspResponse::Definition(id, locations) => {
+                    if self.lsp_state.pending_definition == Some(id) {
+                        self.lsp_state.definition_locations = locations.clone();
+                        self.lsp_state.pending_definition = None;
+                        // Jump to first definition
+                        if let Some(loc) = locations.first() {
+                            self.goto_location(loc);
+                        } else {
+                            self.message = Some("No definition found".to_string());
+                        }
+                    }
+                }
+                LspResponse::References(id, locations) => {
+                    if self.lsp_state.pending_references == Some(id) {
+                        self.lsp_state.pending_references = None;
+                        if locations.is_empty() {
+                            self.message = Some("No references found".to_string());
+                        } else if locations.len() == 1 {
+                            self.goto_location(&locations[0]);
+                        } else {
+                            // Multiple references - show count and go to first
+                            self.message = Some(format!("Found {} references", locations.len()));
+                            self.goto_location(&locations[0]);
+                        }
+                    }
+                }
+                LspResponse::Symbols(id, symbols) => {
+                    // TODO: Show symbols panel
+                    let _ = (id, symbols);
+                }
+                LspResponse::Formatting(id, edits) => {
+                    // Apply formatting edits
+                    let _ = (id, edits);
+                    // TODO: Apply text edits to buffer
+                }
+                LspResponse::Rename(_id, workspace_edit) => {
+                    // Apply rename edits across all affected files
+                    let mut total_edits = 0;
+                    let mut files_changed = 0;
+
+                    for (uri, edits) in &workspace_edit.changes {
+                        if let Some(path_str) = crate::lsp::uri_to_path(uri) {
+                            // Check if we have this file open
+                            let path = std::path::PathBuf::from(&path_str);
+                            if let Some(tab_idx) = self.workspace.find_tab_by_path(&path) {
+                                // Apply edits to the open buffer (in reverse order to preserve positions)
+                                let mut sorted_edits = edits.clone();
+                                sorted_edits.sort_by(|a, b| {
+                                    // Sort by start position, descending
+                                    b.range.start.line.cmp(&a.range.start.line)
+                                        .then(b.range.start.character.cmp(&a.range.start.character))
+                                });
+
+                                for edit in sorted_edits {
+                                    self.workspace.apply_text_edit(tab_idx, &edit);
+                                    total_edits += 1;
+                                }
+                                files_changed += 1;
+                            } else {
+                                // File not open - would need to open, edit, and save
+                                self.message = Some(format!("Note: {} not open, skipped", path_str));
+                            }
+                        }
+                    }
+
+                    if total_edits > 0 {
+                        self.message = Some(format!("Renamed: {} edits in {} file(s)", total_edits, files_changed));
+                    } else {
+                        self.message = Some("No rename edits to apply".to_string());
+                    }
+                }
+                LspResponse::CodeActions(id, actions) => {
+                    // TODO: Show code actions menu
+                    let _ = (id, actions);
+                }
+                LspResponse::Error(id, message) => {
+                    // Clear any pending state for this request
+                    if self.lsp_state.pending_completion == Some(id) {
+                        self.lsp_state.pending_completion = None;
+                    }
+                    if self.lsp_state.pending_hover == Some(id) {
+                        self.lsp_state.pending_hover = None;
+                    }
+                    if self.lsp_state.pending_definition == Some(id) {
+                        self.lsp_state.pending_definition = None;
+                    }
+                    if self.lsp_state.pending_references == Some(id) {
+                        self.lsp_state.pending_references = None;
+                    }
+                    // Optionally show error
+                    if !message.is_empty() {
+                        self.message = Some(format!("LSP: {}", message));
+                    }
+                }
+            }
+        }
+
+        // Update diagnostics for current file
+        if let Some(path) = self.filename() {
+            let path_str = path.to_string_lossy();
+            self.lsp_state.diagnostics = self.workspace.lsp.get_diagnostics(&path_str);
+        }
+
+        // Sync document changes to LSP if buffer has changed
+        self.sync_document_to_lsp();
+
+        had_response
+    }
+
+    /// Sync document changes to LSP server
+    fn sync_document_to_lsp(&mut self) {
+        let current_path = self.filename();
+        let current_hash = self.buffer().content_hash();
+
+        // Check if we switched files
+        let file_changed = current_path != self.lsp_state.last_synced_path;
+
+        // Check if buffer content changed
+        let content_changed = self.lsp_state.last_buffer_hash != Some(current_hash);
+
+        if file_changed {
+            // Close the old document if we had one open
+            if let Some(ref old_path) = self.lsp_state.last_synced_path {
+                let old_path_str = old_path.to_string_lossy();
+                let _ = self.workspace.lsp.close_document(&old_path_str);
+            }
+
+            // Open the new document
+            if let Some(ref path) = current_path {
+                let tab = self.workspace.active_tab();
+                let pane = &tab.panes[tab.active_pane];
+                let buffer_entry = &tab.buffers[pane.buffer_idx];
+
+                let full_path = if buffer_entry.is_orphan {
+                    path.clone()
+                } else {
+                    self.workspace.root.join(path)
+                };
+                let path_str = full_path.to_string_lossy();
+                let content = self.buffer().contents();
+                let _ = self.workspace.lsp.open_document(&path_str, &content);
+            }
+
+            self.lsp_state.last_synced_path = current_path;
+            self.lsp_state.last_buffer_hash = Some(current_hash);
+        } else if content_changed {
+            // Content changed - send didChange notification
+            if let Some(ref path) = current_path {
+                let tab = self.workspace.active_tab();
+                let pane = &tab.panes[tab.active_pane];
+                let buffer_entry = &tab.buffers[pane.buffer_idx];
+
+                let full_path = if buffer_entry.is_orphan {
+                    path.clone()
+                } else {
+                    self.workspace.root.join(path)
+                };
+                let path_str = full_path.to_string_lossy();
+                let content = self.buffer().contents();
+                let _ = self.workspace.lsp.document_changed(&path_str, &content);
+            }
+
+            self.lsp_state.last_buffer_hash = Some(current_hash);
+        }
+    }
+
+    /// Navigate to an LSP location
+    fn goto_location(&mut self, location: &Location) {
+        use crate::lsp::uri_to_path;
+
+        if let Some(path) = uri_to_path(&location.uri) {
+            let path_buf = PathBuf::from(&path);
+            // Open the file if not already open
+            if let Err(e) = self.workspace.open_file(&path_buf) {
+                self.message = Some(format!("Failed to open {}: {}", path, e));
+                return;
+            }
+
+            // Move cursor to the location
+            let line = location.range.start.line as usize;
+            let col = location.range.start.character as usize;
+
+            self.cursors_mut().collapse_to_primary();
+            self.cursor_mut().line = line.min(self.buffer().line_count().saturating_sub(1));
+            self.cursor_mut().col = col.min(self.buffer().line_len(self.cursor().line));
+            self.cursor_mut().desired_col = self.cursor().col;
+            self.cursor_mut().clear_selection();
+            self.scroll_to_cursor();
+        }
+    }
+
+    /// Get the full path to the current file
+    fn current_file_path(&self) -> Option<PathBuf> {
+        let tab = self.workspace.active_tab();
+        let pane = &tab.panes[tab.active_pane];
+        let buffer_entry = &tab.buffers[pane.buffer_idx];
+
+        buffer_entry.path.as_ref().map(|p| {
+            if buffer_entry.is_orphan {
+                p.clone()
+            } else {
+                self.workspace.root.join(p)
+            }
+        })
+    }
+
+    /// LSP: Go to definition
+    fn lsp_goto_definition(&mut self) {
+        if let Some(path) = self.current_file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let line = self.cursor().line as u32;
+            let col = self.cursor().col as u32;
+
+            match self.workspace.lsp.request_definition(&path_str, line, col) {
+                Ok(id) => {
+                    self.lsp_state.pending_definition = Some(id);
+                    self.message = Some("Finding definition...".to_string());
+                }
+                Err(e) => {
+                    self.message = Some(format!("LSP error: {}", e));
+                }
+            }
+        } else {
+            self.message = Some("No file open".to_string());
+        }
+    }
+
+    /// LSP: Find references
+    fn lsp_find_references(&mut self) {
+        if let Some(path) = self.current_file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let line = self.cursor().line as u32;
+            let col = self.cursor().col as u32;
+
+            match self.workspace.lsp.request_references(&path_str, line, col, true) {
+                Ok(id) => {
+                    self.lsp_state.pending_references = Some(id);
+                    self.message = Some("Finding references...".to_string());
+                }
+                Err(e) => {
+                    self.message = Some(format!("LSP error: {}", e));
+                }
+            }
+        } else {
+            self.message = Some("No file open".to_string());
+        }
+    }
+
+    /// LSP: Show hover information
+    fn lsp_hover(&mut self) {
+        if let Some(path) = self.current_file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let line = self.cursor().line as u32;
+            let col = self.cursor().col as u32;
+
+            match self.workspace.lsp.request_hover(&path_str, line, col) {
+                Ok(id) => {
+                    self.lsp_state.pending_hover = Some(id);
+                    self.message = Some("Loading hover info...".to_string());
+                }
+                Err(e) => {
+                    self.message = Some(format!("LSP error: {}", e));
+                }
+            }
+        } else {
+            self.message = Some("No file open".to_string());
+        }
+    }
+
+    /// LSP: Trigger completion
+    fn lsp_complete(&mut self) {
+        if let Some(path) = self.current_file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let line = self.cursor().line as u32;
+            let col = self.cursor().col as u32;
+
+            match self.workspace.lsp.request_completions(&path_str, line, col) {
+                Ok(id) => {
+                    self.lsp_state.pending_completion = Some(id);
+                    self.message = Some("Loading completions...".to_string());
+                }
+                Err(e) => {
+                    self.message = Some(format!("LSP error: {}", e));
+                }
+            }
+        } else {
+            self.message = Some("No file open".to_string());
+        }
+    }
+
+    /// Toggle the LSP server manager panel
+    fn toggle_server_manager(&mut self) {
+        if self.server_manager.visible {
+            self.server_manager.hide();
+        } else {
+            self.server_manager.show();
+        }
+    }
+
+    /// Handle key input when server manager panel is visible
+    fn handle_server_manager_key(&mut self, key: Key, mods: Modifiers) -> Result<()> {
+        let max_visible = 10; // Should match screen.rs
+
+        // Alt+M toggles the panel closed
+        if key == Key::Char('m') && mods.alt {
+            self.server_manager.hide();
+            return Ok(());
+        }
+
+        // Handle confirm mode
+        if self.server_manager.confirm_mode {
+            match key {
+                Key::Char('y') | Key::Char('Y') => {
+                    // Start install in background thread (non-blocking)
+                    self.server_manager.start_install();
+                }
+                Key::Char('n') | Key::Char('N') | Key::Escape => {
+                    self.server_manager.cancel_confirm();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Handle manual info mode
+        if self.server_manager.manual_info_mode {
+            match key {
+                Key::Char('c') | Key::Char('C') => {
+                    // Copy install instructions to clipboard
+                    if let Some(text) = self.server_manager.get_manual_install_text() {
+                        if let Some(ref mut clip) = self.clipboard {
+                            if clip.set_text(&text).is_ok() {
+                                self.server_manager.mark_copied();
+                            } else {
+                                self.server_manager.status_message = Some("Failed to copy".to_string());
+                            }
+                        } else {
+                            // Fall back to internal clipboard
+                            self.internal_clipboard = text;
+                            self.server_manager.mark_copied();
+                        }
+                    }
+                }
+                Key::Escape | Key::Char('q') => {
+                    self.server_manager.cancel_confirm();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Normal panel navigation
+        match key {
+            Key::Up | Key::Char('k') => {
+                self.server_manager.move_up();
+            }
+            Key::Down | Key::Char('j') => {
+                self.server_manager.move_down(max_visible);
+            }
+            Key::Enter => {
+                self.server_manager.enter_confirm_mode();
+            }
+            Key::Char('r') | Key::Char('R') => {
+                self.server_manager.refresh();
+            }
+            Key::Escape | Key::Char('q') => {
+                self.server_manager.hide();
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    /// LSP: Rename symbol - opens prompt for new name
+    fn lsp_rename(&mut self) {
+        if let Some(path) = self.current_file_path() {
+            let path_str = path.to_string_lossy().to_string();
+            let line = self.cursor().line as u32;
+            let col = self.cursor().col as u32;
+
+            // Get the word under cursor to show in prompt
+            let buffer = self.buffer();
+            let cursor = self.cursor();
+            let current_word = if let Some(line_slice) = buffer.line(cursor.line) {
+                let line_text: String = line_slice.chars().collect();
+                let mut start = cursor.col;
+                let mut end = cursor.col;
+
+                // Find word boundaries
+                while start > 0 {
+                    let ch = line_text.chars().nth(start - 1).unwrap_or(' ');
+                    if ch.is_alphanumeric() || ch == '_' {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                while end < line_text.len() {
+                    let ch = line_text.chars().nth(end).unwrap_or(' ');
+                    if ch.is_alphanumeric() || ch == '_' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                line_text[start..end].to_string()
+            } else {
+                String::new()
+            };
+
+            self.prompt = PromptState::TextInput {
+                label: "Rename to: ".to_string(),
+                buffer: current_word.clone(),
+                action: TextInputAction::LspRename { path: path_str, line, col },
+            };
+            self.message = Some(format!("Rename '{}' to: {}", current_word, current_word));
+        } else {
+            self.message = Some("No file open".to_string());
+        }
+    }
+
+    /// Accept the currently selected completion and insert it
+    fn accept_completion(&mut self) {
+        if self.lsp_state.completions.is_empty() {
+            return;
+        }
+
+        let completion = self.lsp_state.completions[self.lsp_state.completion_index].clone();
+
+        // Determine the text to insert
+        let insert_text = if let Some(ref text_edit) = completion.text_edit {
+            // Use text edit if provided (includes range to replace)
+            // For now, just use the new text - proper range replacement would be more complex
+            text_edit.new_text.clone()
+        } else if let Some(ref insert) = completion.insert_text {
+            insert.clone()
+        } else {
+            completion.label.clone()
+        };
+
+        // Find the start of the word being completed (walk back from cursor)
+        let buffer = self.buffer();
+        let cursor = self.cursor();
+        let line_idx = cursor.line;
+        let cursor_col = cursor.col;
+        let mut word_start = cursor_col;
+
+        // Walk back to find word start (alphanumeric or underscore)
+        if let Some(line_slice) = buffer.line(line_idx) {
+            let line_text: String = line_slice.chars().collect();
+            while word_start > 0 {
+                let prev_char = line_text.chars().nth(word_start - 1).unwrap_or(' ');
+                if prev_char.is_alphanumeric() || prev_char == '_' {
+                    word_start -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Delete the partial word and insert completion
+        if word_start < cursor_col {
+            // Select from word start to cursor
+            let cursor = self.cursor_mut();
+            cursor.anchor_line = cursor.line;
+            cursor.anchor_col = word_start;
+            cursor.selecting = true;
+        }
+
+        // Insert the completion text (this will replace selection if any)
+        for ch in insert_text.chars() {
+            self.insert_char(ch);
+        }
+
+        // Clear completion state
+        self.lsp_state.completion_visible = false;
+        self.lsp_state.completions.clear();
+        self.lsp_state.completion_index = 0;
     }
 
     /// Process a key event, handling ESC as potential Alt prefix
@@ -404,7 +987,11 @@ impl Editor {
             }
             Mouse::ScrollDown { .. } => {
                 // Scroll down 3 lines
-                let max_viewport = self.buffer().line_count().saturating_sub(1);
+                // Calculate visible rows (accounting for tab bar, gap, and status bar)
+                let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+                let visible_rows = (self.screen.rows as usize).saturating_sub(2 + top_offset);
+                // Max viewport is when the last line is at the bottom of visible area
+                let max_viewport = self.buffer().line_count().saturating_sub(visible_rows).max(0);
                 let new_line = (self.viewport_line() + 3).min(max_viewport);
                 self.set_viewport_line(new_line);
             }
@@ -492,29 +1079,93 @@ impl Editor {
                 top_offset,
             )
         } else {
-            // Single pane - use simpler render path
+            // Single pane - use simpler render path with syntax highlighting
             let pane = &tab.panes[tab.active_pane];
             let buffer_entry = &tab.buffers[pane.buffer_idx];
             let buffer = &buffer_entry.buffer;
             let cursors = &pane.cursors;
             let viewport_line = pane.viewport_line;
+            let viewport_col = pane.viewport_col;
             let is_modified = buffer_entry.is_modified();
+            let highlighter = &buffer_entry.highlighter;
 
             // Find matching bracket for primary cursor
             let cursor = cursors.primary();
             let bracket_match = buffer.find_matching_bracket(cursor.line, cursor.col);
 
-            self.screen.render_with_offset(
+            self.screen.render_with_syntax(
                 buffer,
                 cursors,
                 viewport_line,
+                viewport_col,
                 filename,
                 self.message.as_deref(),
                 bracket_match,
                 fuss_width,
                 top_offset,
                 is_modified,
-            )
+                highlighter,
+            )?;
+
+            // Render diagnostics markers in gutter
+            if !self.lsp_state.diagnostics.is_empty() {
+                self.screen.render_diagnostics_gutter(
+                    &self.lsp_state.diagnostics,
+                    viewport_line,
+                    fuss_width,
+                    top_offset,
+                )?;
+            }
+
+            // Render completion popup if visible
+            if self.lsp_state.completion_visible && !self.lsp_state.completions.is_empty() {
+                let cursor = cursors.primary();
+                // Calculate cursor screen position
+                let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
+                let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+                let cursor_col = cursor.col as u16 + line_num_width + 1;
+
+                self.screen.render_completion_popup(
+                    &self.lsp_state.completions,
+                    self.lsp_state.completion_index,
+                    cursor_row,
+                    cursor_col,
+                    fuss_width,
+                )?;
+            }
+
+            // Render hover popup if visible
+            if self.lsp_state.hover_visible {
+                if let Some(ref hover) = self.lsp_state.hover {
+                    let cursor = cursors.primary();
+                    let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
+                    let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+                    let cursor_col = cursor.col as u16 + line_num_width + 1;
+
+                    self.screen.render_hover_popup(
+                        hover,
+                        cursor_row,
+                        cursor_col,
+                        fuss_width,
+                    )?;
+                }
+            }
+
+            // Render server manager panel if visible (on top of everything)
+            if self.server_manager.visible {
+                self.screen.render_server_manager_panel(&self.server_manager)?;
+            }
+
+            // After all overlays are rendered, reposition cursor to the correct location
+            // (overlays may have moved the terminal cursor position)
+            let cursor = cursors.primary();
+            let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
+            let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+            // Account for horizontal scroll offset
+            let cursor_screen_col = fuss_width + line_num_width + 1 + (cursor.col.saturating_sub(viewport_col)) as u16;
+            self.screen.show_cursor_at(cursor_screen_col, cursor_row)?;
+
+            Ok(())
         }
     }
 
@@ -522,6 +1173,11 @@ impl Editor {
         // Handle active prompts first
         if self.prompt != PromptState::None {
             return self.handle_prompt_key(key);
+        }
+
+        // Handle server manager panel when visible
+        if self.server_manager.visible {
+            return self.handle_server_manager_key(key, mods);
         }
 
         // Clear message on any key
@@ -536,6 +1192,58 @@ impl Editor {
         // Route to fuss mode handler if active
         if self.workspace.fuss.active {
             return self.handle_fuss_key(key, mods);
+        }
+
+        // Handle completion popup navigation when visible
+        if self.lsp_state.completion_visible {
+            match (&key, &mods) {
+                // Navigate up in completion list
+                (Key::Up, _) => {
+                    if self.lsp_state.completion_index > 0 {
+                        self.lsp_state.completion_index -= 1;
+                    } else {
+                        // Wrap to bottom
+                        self.lsp_state.completion_index = self.lsp_state.completions.len().saturating_sub(1);
+                    }
+                    return Ok(());
+                }
+                // Navigate down in completion list
+                (Key::Down, _) => {
+                    if self.lsp_state.completion_index < self.lsp_state.completions.len().saturating_sub(1) {
+                        self.lsp_state.completion_index += 1;
+                    } else {
+                        // Wrap to top
+                        self.lsp_state.completion_index = 0;
+                    }
+                    return Ok(());
+                }
+                // Select completion with Enter or Tab
+                (Key::Enter, _) | (Key::Tab, _) => {
+                    self.accept_completion();
+                    return Ok(());
+                }
+                // Dismiss completion popup with Escape
+                (Key::Escape, _) => {
+                    self.lsp_state.completion_visible = false;
+                    self.lsp_state.completions.clear();
+                    return Ok(());
+                }
+                // Any other key dismisses popup and continues normally
+                _ => {
+                    self.lsp_state.completion_visible = false;
+                    self.lsp_state.completions.clear();
+                }
+            }
+        }
+
+        // Dismiss hover popup on any key press
+        if self.lsp_state.hover_visible {
+            self.lsp_state.hover_visible = false;
+            self.lsp_state.hover = None;
+            // Let Escape just dismiss the popup without doing anything else
+            if matches!(key, Key::Escape) {
+                return Ok(());
+            }
         }
 
         // Break undo group on any non-character key (movement, commands, etc.)
@@ -716,6 +1424,20 @@ impl Editor {
             (Key::Char(','), Modifiers { alt: true, .. }) => self.workspace.prev_tab(),
             // New tab: Alt+T
             (Key::Char('t'), Modifiers { alt: true, .. }) => self.workspace.new_tab(),
+
+            // === LSP operations ===
+            // Go to definition: F12
+            (Key::F(12), Modifiers { shift: false, .. }) => self.lsp_goto_definition(),
+            // Find references: Shift+F12
+            (Key::F(12), Modifiers { shift: true, .. }) => self.lsp_find_references(),
+            // Hover info: F1
+            (Key::F(1), _) => self.lsp_hover(),
+            // Code completion: Ctrl+Space
+            (Key::Char(' '), Modifiers { ctrl: true, .. }) => self.lsp_complete(),
+            // Rename: F2
+            (Key::F(2), _) => self.lsp_rename(),
+            // Server manager: Alt+M
+            (Key::Char('m'), Modifiers { alt: true, .. }) => self.toggle_server_manager(),
 
             _ => {}
         }
@@ -1024,8 +1746,13 @@ impl Editor {
     }
 
     fn select_word(&mut self) {
-        // If no selection, select word at cursor
-        // If already have selection, this could expand to next occurrence (future enhancement)
+        // If primary cursor has a selection, find next occurrence and add cursor there
+        if self.cursor().has_selection() {
+            self.select_next_occurrence();
+            return;
+        }
+
+        // No selection - select word at cursor
         if let Some(line_str) = self.buffer().line_str(self.cursor().line) {
             let chars: Vec<char> = line_str.chars().collect();
             let col = self.cursor().col.min(chars.len());
@@ -1061,6 +1788,120 @@ impl Editor {
                 self.cursor_mut().selecting = true;
             }
         }
+    }
+
+    /// Find the next occurrence of the selected text and add a cursor there
+    fn select_next_occurrence(&mut self) {
+        // Get the selected text from primary cursor
+        let selected_text = {
+            let cursor = self.cursor();
+            if !cursor.has_selection() {
+                return;
+            }
+            let (start, end) = cursor.selection().ordered();
+            let buffer = self.buffer();
+
+            // Extract selected text
+            let mut text = String::new();
+            for line_idx in start.line..=end.line {
+                if let Some(line) = buffer.line_str(line_idx) {
+                    let line_start = if line_idx == start.line { start.col } else { 0 };
+                    let line_end = if line_idx == end.line { end.col } else { line.len() };
+                    if line_start < line_end && line_end <= line.len() {
+                        text.push_str(&line[line_start..line_end]);
+                    }
+                    if line_idx < end.line {
+                        text.push('\n');
+                    }
+                }
+            }
+            text
+        };
+
+        if selected_text.is_empty() {
+            return;
+        }
+
+        // Find the position to start searching from (after the last cursor with this selection)
+        let search_start = {
+            let cursors = self.cursors();
+            let mut max_pos = (0usize, 0usize);
+            for cursor in cursors.all() {
+                if cursor.has_selection() {
+                    let (_, end) = cursor.selection().ordered();
+                    if (end.line, end.col) > max_pos {
+                        max_pos = (end.line, end.col);
+                    }
+                }
+            }
+            max_pos
+        };
+
+        // Search for next occurrence
+        let buffer = self.buffer();
+        let line_count = buffer.line_count();
+        let search_text = &selected_text;
+
+        // Start searching from the line after the last selection end
+        for line_idx in search_start.0..line_count {
+            if let Some(line) = buffer.line_str(line_idx) {
+                let start_col = if line_idx == search_start.0 { search_start.1 } else { 0 };
+
+                // Search for the text in this line (only works for single-line selections for now)
+                if !search_text.contains('\n') {
+                    if let Some(found_col) = line[start_col..].find(search_text) {
+                        let match_start = start_col + found_col;
+                        let match_end = match_start + search_text.len();
+
+                        // Add a new cursor with selection at this location
+                        self.cursors_mut().add_with_selection(
+                            line_idx,
+                            match_end,
+                            line_idx,
+                            match_start,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Wrap around to beginning if not found
+        for line_idx in 0..=search_start.0 {
+            if let Some(line) = buffer.line_str(line_idx) {
+                let end_col = if line_idx == search_start.0 {
+                    // Don't search past where we started
+                    search_start.1.saturating_sub(search_text.len())
+                } else {
+                    line.len()
+                };
+
+                if !search_text.contains('\n') {
+                    if let Some(found_col) = line[..end_col].find(search_text) {
+                        let match_start = found_col;
+                        let match_end = match_start + search_text.len();
+
+                        // Check if this position already has a cursor
+                        let already_has_cursor = self.cursors().all().iter().any(|c| {
+                            c.line == line_idx && c.col == match_end
+                        });
+
+                        if !already_has_cursor {
+                            self.cursors_mut().add_with_selection(
+                                line_idx,
+                                match_end,
+                                line_idx,
+                                match_start,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // No more occurrences found
+        self.message = Some("No more occurrences".to_string());
     }
 
     // === Bracket/Quote Operations ===
@@ -2146,16 +2987,47 @@ impl Editor {
     // === Viewport ===
 
     fn scroll_to_cursor(&mut self) {
-        let visible_rows = self.screen.rows.saturating_sub(1) as usize;
+        // Calculate top offset (tab bar takes 1 row if multiple tabs)
+        let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+        // Vertical scrolling (2 rows reserved: gap + status bar, plus top_offset for tab bar)
+        let visible_rows = (self.screen.rows as usize).saturating_sub(2 + top_offset);
         let cursor_line = self.cursor().line;
-        let viewport = self.viewport_line();
+        let viewport_line = self.viewport_line();
 
-        if cursor_line < viewport {
+        if cursor_line < viewport_line {
             self.set_viewport_line(cursor_line);
         }
 
-        if cursor_line >= viewport + visible_rows {
+        if cursor_line >= viewport_line + visible_rows {
             self.set_viewport_line(cursor_line - visible_rows + 1);
+        }
+
+        // Horizontal scrolling
+        let line_num_width = self.screen.line_number_width(self.buffer().line_count());
+        let fuss_width = if self.workspace.fuss.active {
+            self.workspace.fuss.width(self.screen.cols)
+        } else {
+            0
+        };
+        // Available text columns = screen width - fuss sidebar - line numbers - 1 (separator)
+        let visible_cols = (self.screen.cols as usize)
+            .saturating_sub(fuss_width as usize)
+            .saturating_sub(line_num_width + 1);
+
+        let cursor_col = self.cursor().col;
+        let viewport_col = self.viewport_col();
+
+        // Keep some margin (3 chars) so cursor isn't right at the edge
+        let margin = 3;
+
+        if cursor_col < viewport_col {
+            // Cursor is left of viewport - scroll left
+            self.set_viewport_col(cursor_col.saturating_sub(margin));
+        }
+
+        if cursor_col >= viewport_col + visible_cols.saturating_sub(margin) {
+            // Cursor is right of viewport - scroll right
+            self.set_viewport_col(cursor_col.saturating_sub(visible_cols.saturating_sub(margin + 1)));
         }
     }
 
@@ -2545,6 +3417,22 @@ impl Editor {
             TextInputAction::GitTag => {
                 let (_, msg) = self.workspace.fuss.git_tag(buffer);
                 self.message = Some(msg);
+            }
+            TextInputAction::LspRename { path, line, col } => {
+                if buffer.is_empty() {
+                    self.message = Some("Rename cancelled: empty name".to_string());
+                    return;
+                }
+                match self.workspace.lsp.request_rename(&path, line, col, buffer) {
+                    Ok(_id) => {
+                        self.message = Some(format!("Renaming to '{}'...", buffer));
+                        // Note: The actual rename edits will be applied when we receive
+                        // the response and implement WorkspaceEdit handling
+                    }
+                    Err(e) => {
+                        self.message = Some(format!("Rename failed: {}", e));
+                    }
+                }
             }
         }
     }

@@ -2,7 +2,9 @@ mod buffer;
 mod editor;
 mod fuss;
 mod input;
+mod lsp;
 mod render;
+mod syntax;
 mod util;
 mod workspace;
 
