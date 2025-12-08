@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::buffer::Buffer;
 use crate::editor::{Cursors, Position};
 use crate::fuss::VisibleItem;
-use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, ServerManagerPanel};
+use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, Location, ServerManagerPanel};
 use crate::syntax::{Highlighter, HighlightState, Token};
 
 // Editor color scheme (256-color palette)
@@ -1943,6 +1943,181 @@ impl Screen {
             SetBackgroundColor(input_bg),
             crossterm::cursor::Show,
         )?;
+
+        Ok(())
+    }
+
+    /// Render the LSP references panel (sidebar style)
+    pub fn render_references_panel(
+        &mut self,
+        locations: &[Location],
+        selected_index: usize,
+        query: &str,
+        workspace_root: &std::path::Path,
+    ) -> Result<()> {
+        let (width, height) = (self.cols as usize, self.rows as usize);
+
+        // Panel dimensions - sidebar style on the right
+        let panel_width = 50.min(width / 2);
+        let panel_height = height.saturating_sub(3); // Leave room for tab bar and status bar
+        let start_col = width.saturating_sub(panel_width);
+        let start_row = 1u16; // Below tab bar
+
+        // Filter locations based on query
+        let filtered: Vec<(usize, &Location)> = if query.is_empty() {
+            locations.iter().enumerate().collect()
+        } else {
+            let q = query.to_lowercase();
+            locations.iter().enumerate()
+                .filter(|(_, loc)| loc.uri.to_lowercase().contains(&q))
+                .collect()
+        };
+
+        // Colors
+        let bg = Color::AnsiValue(235);
+        let border_color = Color::AnsiValue(244);
+        let header_color = Color::Cyan;
+        let file_color = Color::AnsiValue(252);
+        let line_num_color = Color::AnsiValue(243);
+        let selected_bg = Color::AnsiValue(240);
+        let input_bg = Color::AnsiValue(238);
+
+        // Draw top border with title
+        let title = format!(" References ({}) ", filtered.len());
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("┌"),
+            SetForegroundColor(header_color),
+            Print(&title),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}┐", "", width = panel_width.saturating_sub(title.len() + 2))),
+        )?;
+
+        // Draw filter input row
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetForegroundColor(Color::AnsiValue(248)),
+            Print("Filter: "),
+            SetBackgroundColor(input_bg),
+            SetForegroundColor(Color::White),
+            Print(format!("{:<width$}", query, width = panel_width.saturating_sub(12))),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+        )?;
+
+        // Draw separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row + 2),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("├{:─<width$}┤", "", width = panel_width.saturating_sub(2))),
+        )?;
+
+        // Calculate visible range with scrolling
+        let visible_rows = panel_height.saturating_sub(5); // Account for borders, title, filter, help
+        let scroll_offset = if selected_index >= visible_rows {
+            selected_index - visible_rows + 1
+        } else {
+            0
+        };
+
+        // Draw reference items
+        for (display_idx, (_orig_idx, loc)) in filtered.iter().enumerate().skip(scroll_offset).take(visible_rows) {
+            let row = start_row + 3 + (display_idx - scroll_offset) as u16;
+            let is_selected = display_idx == selected_index;
+
+            // Extract relative path and line number
+            let path_str = if loc.uri.starts_with("file://") {
+                &loc.uri[7..]
+            } else {
+                &loc.uri
+            };
+
+            // Make path relative to workspace if possible
+            let display_path = if let Ok(rel_path) = std::path::Path::new(path_str).strip_prefix(workspace_root) {
+                rel_path.to_string_lossy().to_string()
+            } else {
+                // Just show filename if we can't make it relative
+                std::path::Path::new(path_str)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path_str.to_string())
+            };
+
+            let line_info = format!(":{}", loc.range.start.line + 1);
+            let max_path_width = panel_width.saturating_sub(line_info.len() + 4);
+            let truncated_path = if display_path.len() > max_path_width {
+                format!("...{}", &display_path[display_path.len().saturating_sub(max_path_width - 3)..])
+            } else {
+                display_path
+            };
+
+            let item_bg = if is_selected { selected_bg } else { bg };
+
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(item_bg),
+                SetForegroundColor(border_color),
+                Print("│ "),
+                SetForegroundColor(file_color),
+                Print(format!("{:<width$}", truncated_path, width = max_path_width)),
+                SetForegroundColor(line_num_color),
+                Print(&line_info),
+                SetForegroundColor(border_color),
+                Print(format!("{:>width$}│", "", width = panel_width.saturating_sub(truncated_path.len() + line_info.len() + 3))),
+            )?;
+        }
+
+        // Fill remaining rows with empty space
+        let items_drawn = filtered.len().saturating_sub(scroll_offset).min(visible_rows);
+        for i in items_drawn..visible_rows {
+            let row = start_row + 3 + i as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(bg),
+                SetForegroundColor(border_color),
+                Print(format!("│{:width$}│", "", width = panel_width.saturating_sub(2))),
+            )?;
+        }
+
+        // Draw help text row
+        let help_row = start_row + 3 + visible_rows as u16;
+        let help_text = "↑↓:nav  Enter:go  Esc:close";
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("├"),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!(" {:<width$}", help_text, width = panel_width.saturating_sub(3))),
+            SetForegroundColor(border_color),
+            Print("┤"),
+        )?;
+
+        // Draw bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("└{:─<width$}┘", "", width = panel_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Hide cursor when in references panel
+        execute!(self.stdout, Hide)?;
 
         Ok(())
     }

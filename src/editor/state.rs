@@ -34,6 +34,13 @@ enum PromptState {
         line: u32,
         col: u32,
     },
+    /// LSP references panel
+    ReferencesPanel {
+        locations: Vec<Location>,
+        selected_index: usize,
+        /// Search query being typed (for filtering)
+        query: String,
+    },
 }
 
 /// Action to perform when text input is complete
@@ -394,11 +401,16 @@ impl Editor {
                         if locations.is_empty() {
                             self.message = Some("No references found".to_string());
                         } else if locations.len() == 1 {
+                            // Single reference - just go there
                             self.goto_location(&locations[0]);
                         } else {
-                            // Multiple references - show count and go to first
-                            self.message = Some(format!("Found {} references", locations.len()));
-                            self.goto_location(&locations[0]);
+                            // Multiple references - show the references panel
+                            self.prompt = PromptState::ReferencesPanel {
+                                locations,
+                                selected_index: 0,
+                                query: String::new(),
+                            };
+                            self.message = None;
                         }
                     }
                 }
@@ -1171,6 +1183,11 @@ impl Editor {
             // Render rename modal if active
             if let PromptState::RenameModal { ref original_name, ref new_name, .. } = self.prompt {
                 self.screen.render_rename_modal(original_name, new_name)?;
+            }
+
+            // Render references panel if active
+            if let PromptState::ReferencesPanel { ref locations, selected_index, ref query } = self.prompt {
+                self.screen.render_references_panel(locations, selected_index, query, &self.workspace.root)?;
             }
 
             // After all overlays are rendered, reposition cursor to the correct location
@@ -3456,6 +3473,69 @@ impl Editor {
                     }
                     Key::Char(c) => {
                         new_name.push(c);
+                    }
+                    _ => {}
+                }
+            }
+            PromptState::ReferencesPanel { ref locations, ref mut selected_index, ref mut query } => {
+                // Filter locations based on query
+                let filtered: Vec<(usize, &Location)> = if query.is_empty() {
+                    locations.iter().enumerate().collect()
+                } else {
+                    let q = query.to_lowercase();
+                    locations.iter().enumerate()
+                        .filter(|(_, loc)| {
+                            loc.uri.to_lowercase().contains(&q)
+                        })
+                        .collect()
+                };
+
+                match key {
+                    Key::Enter => {
+                        // Jump to selected reference
+                        if let Some((orig_idx, _)) = filtered.get(*selected_index) {
+                            let loc = locations[*orig_idx].clone();
+                            self.prompt = PromptState::None;
+                            self.goto_location(&loc);
+                        }
+                    }
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                        self.message = None;
+                    }
+                    Key::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                        }
+                    }
+                    Key::Down => {
+                        if *selected_index + 1 < filtered.len() {
+                            *selected_index += 1;
+                        }
+                    }
+                    Key::PageUp => {
+                        *selected_index = selected_index.saturating_sub(10);
+                    }
+                    Key::PageDown => {
+                        *selected_index = (*selected_index + 10).min(filtered.len().saturating_sub(1));
+                    }
+                    Key::Home => {
+                        *selected_index = 0;
+                    }
+                    Key::End => {
+                        if !filtered.is_empty() {
+                            *selected_index = filtered.len() - 1;
+                        }
+                    }
+                    Key::Backspace => {
+                        query.pop();
+                        // Reset selection when filter changes
+                        *selected_index = 0;
+                    }
+                    Key::Char(c) => {
+                        query.push(c);
+                        // Reset selection when filter changes
+                        *selected_index = 0;
                     }
                     _ => {}
                 }
