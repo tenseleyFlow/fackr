@@ -841,11 +841,13 @@ impl Screen {
         hints_expanded: bool,
         repo_name: &str,
         branch: Option<&str>,
+        git_mode: bool,
     ) -> Result<()> {
         let width = width as usize;
         let text_rows = self.rows.saturating_sub(1) as usize;
         let hint_rows = if hints_expanded { 4 } else { 1 };
-        let header_rows = 2; // Header line + separator
+        // Header line + separator + optional git mode line
+        let header_rows = if git_mode { 3 } else { 2 };
         let tree_rows = text_rows.saturating_sub(hint_rows + header_rows);
 
         // Draw header: repo_name:branch
@@ -892,6 +894,21 @@ impl Screen {
             Print(&separator),
             ResetColor,
         )?;
+
+        // Draw git mode indicator line
+        if git_mode {
+            let git_row = 2u16;
+            execute!(self.stdout, MoveTo(0, git_row))?;
+            let git_hint = "Git: a/u/d/m/p/l/f/t";
+            let padded = format!("{:<width$}", git_hint, width = width);
+            execute!(
+                self.stdout,
+                SetBackgroundColor(Color::AnsiValue(235)),
+                SetForegroundColor(Color::Yellow),
+                Print(&padded),
+                ResetColor,
+            )?;
+        }
 
         // Draw file tree (starting after header)
         for row in 0..tree_rows {
@@ -1015,10 +1032,10 @@ impl Screen {
         let hint_start = header_rows + tree_rows;
         if hints_expanded {
             let hints = [
-                "j/k:nav spc:toggle o:open .:hidden",
-                "a:stage u:unstage d:diff m:commit",
-                "p:push l:pull f:fetch t:tag",
-                "ctrl-b:close ctrl-/:hints",
+                "type:jump  spc:toggle  enter:open",
+                "alt-.:hidden  alt-g:git  ctrl-v/s:split",
+                "ctrl-b:close  ctrl-/:hints",
+                "",
             ];
             for (i, hint) in hints.iter().enumerate() {
                 if hint_start + i < text_rows {
@@ -1994,6 +2011,7 @@ impl Screen {
             Print(&title),
             SetForegroundColor(border_color),
             Print(format!("{:─<width$}┐", "", width = panel_width.saturating_sub(title.len() + 2))),
+            ResetColor,
         )?;
 
         // Draw filter input row
@@ -2011,6 +2029,7 @@ impl Screen {
             SetBackgroundColor(bg),
             SetForegroundColor(border_color),
             Print("│"),
+            ResetColor,
         )?;
 
         // Draw separator
@@ -2020,6 +2039,7 @@ impl Screen {
             SetBackgroundColor(bg),
             SetForegroundColor(border_color),
             Print(format!("├{:─<width$}┤", "", width = panel_width.saturating_sub(2))),
+            ResetColor,
         )?;
 
         // Calculate visible range with scrolling
@@ -2063,6 +2083,12 @@ impl Screen {
 
             let item_bg = if is_selected { selected_bg } else { bg };
 
+            // Build a fixed-width line: "│ " + path (padded to max_path_width) + line_info + " │"
+            // Total: 2 + max_path_width + line_info.len() + 2 = panel_width
+            // So we need: max_path_width = panel_width - line_info.len() - 4
+            // The remaining padding goes after line_info
+            let remaining = panel_width.saturating_sub(max_path_width + line_info.len() + 4);
+
             execute!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
@@ -2073,8 +2099,10 @@ impl Screen {
                 Print(format!("{:<width$}", truncated_path, width = max_path_width)),
                 SetForegroundColor(line_num_color),
                 Print(&line_info),
+                Print(format!("{:width$}", "", width = remaining)),
                 SetForegroundColor(border_color),
-                Print(format!("{:>width$}│", "", width = panel_width.saturating_sub(truncated_path.len() + line_info.len() + 3))),
+                Print(" │"),
+                ResetColor,
             )?;
         }
 
@@ -2088,6 +2116,7 @@ impl Screen {
                 SetBackgroundColor(bg),
                 SetForegroundColor(border_color),
                 Print(format!("│{:width$}│", "", width = panel_width.saturating_sub(2))),
+                ResetColor,
             )?;
         }
 
@@ -2104,6 +2133,7 @@ impl Screen {
             Print(format!(" {:<width$}", help_text, width = panel_width.saturating_sub(3))),
             SetForegroundColor(border_color),
             Print("┤"),
+            ResetColor,
         )?;
 
         // Draw bottom border
@@ -2119,6 +2149,7 @@ impl Screen {
         // Hide cursor when in references panel
         execute!(self.stdout, Hide)?;
 
+        self.stdout.flush()?;
         Ok(())
     }
 

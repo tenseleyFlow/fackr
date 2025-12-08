@@ -4,7 +4,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 use super::tree::FileTree;
+
+/// Timeout for filter reset (in milliseconds)
+const FILTER_TIMEOUT_MS: u128 = 500;
 
 /// Fuss mode state
 #[derive(Debug)]
@@ -23,6 +27,12 @@ pub struct FussMode {
     pub hints_expanded: bool,
     /// Workspace root path
     root_path: Option<PathBuf>,
+    /// Current fuzzy filter query
+    pub filter: String,
+    /// Last time a filter character was typed
+    filter_last_input: Option<Instant>,
+    /// Whether git mode is active (after pressing Alt+G)
+    pub git_mode: bool,
 }
 
 impl Default for FussMode {
@@ -35,6 +45,9 @@ impl Default for FussMode {
             width_percent: 30,
             hints_expanded: false,
             root_path: None,
+            filter: String::new(),
+            filter_last_input: None,
+            git_mode: false,
         }
     }
 }
@@ -476,4 +489,91 @@ impl FussMode {
             None
         }
     }
+
+    /// Add a character to the filter and jump to first match
+    /// Resets the filter if too much time has passed since last input
+    pub fn filter_push(&mut self, c: char) {
+        let now = Instant::now();
+
+        // Check if we should reset the filter due to timeout
+        if let Some(last) = self.filter_last_input {
+            if now.duration_since(last).as_millis() > FILTER_TIMEOUT_MS {
+                self.filter.clear();
+            }
+        }
+
+        self.filter.push(c);
+        self.filter_last_input = Some(now);
+        self.jump_to_filter_match();
+    }
+
+    /// Remove last character from filter
+    pub fn filter_pop(&mut self) {
+        self.filter.pop();
+        if !self.filter.is_empty() {
+            self.jump_to_filter_match();
+        }
+    }
+
+    /// Clear the filter
+    pub fn filter_clear(&mut self) {
+        self.filter.clear();
+        self.filter_last_input = None;
+    }
+
+    /// Jump to the first item matching the current filter (fuzzy match)
+    fn jump_to_filter_match(&mut self) {
+        if self.filter.is_empty() {
+            return;
+        }
+
+        let tree = match &self.tree {
+            Some(t) => t,
+            None => return,
+        };
+
+        let items = tree.visible_items();
+        let query = self.filter.to_lowercase();
+
+        // Find best matching item starting from current position + 1
+        // This allows pressing the same keys repeatedly to cycle through matches
+        let start = (self.selected + 1) % items.len().max(1);
+
+        // First try: find match starting from current position
+        for offset in 0..items.len() {
+            let idx = (start + offset) % items.len();
+            let name = items[idx].name.to_lowercase();
+
+            if fuzzy_match(&name, &query) {
+                self.selected = idx;
+                return;
+            }
+        }
+    }
+
+    /// Enter git mode (after Alt+G)
+    pub fn enter_git_mode(&mut self) {
+        self.git_mode = true;
+    }
+
+    /// Exit git mode
+    pub fn exit_git_mode(&mut self) {
+        self.git_mode = false;
+    }
+}
+
+/// Simple fuzzy matching: checks if query characters appear in order in the target
+fn fuzzy_match(target: &str, query: &str) -> bool {
+    let mut query_chars = query.chars().peekable();
+
+    for c in target.chars() {
+        if query_chars.peek() == Some(&c) {
+            query_chars.next();
+        }
+        if query_chars.peek().is_none() {
+            return true;
+        }
+    }
+
+    query_chars.peek().is_none()
 }

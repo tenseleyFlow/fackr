@@ -485,8 +485,8 @@ impl Editor {
             }
         }
 
-        // Update diagnostics for current file
-        if let Some(path) = self.filename() {
+        // Update diagnostics for current file (need full path to match LSP URIs)
+        if let Some(path) = self.current_file_path() {
             let path_str = path.to_string_lossy();
             self.lsp_state.diagnostics = self.workspace.lsp.get_diagnostics(&path_str);
         }
@@ -1049,6 +1049,7 @@ impl Editor {
                     self.workspace.fuss.hints_expanded,
                     &repo_name,
                     branch.as_deref(),
+                    self.workspace.fuss.git_mode,
                 )?;
             }
         }
@@ -1466,8 +1467,8 @@ impl Editor {
             (Key::F(12), Modifiers { shift: true, .. }) => self.lsp_find_references(),
             // Hover info: F1
             (Key::F(1), _) => self.lsp_hover(),
-            // Code completion: Ctrl+Space
-            (Key::Char(' '), Modifiers { ctrl: true, .. }) => self.lsp_complete(),
+            // Code completion: Ctrl+N (vim-style)
+            (Key::Char('n'), Modifiers { ctrl: true, .. }) => self.lsp_complete(),
             // Rename: F2
             (Key::F(2), _) => self.lsp_rename(),
             // Server manager: Alt+M
@@ -3138,6 +3139,11 @@ impl Editor {
     }
 
     fn handle_fuss_key(&mut self, key: Key, mods: Modifiers) -> Result<()> {
+        // Handle git mode separately
+        if self.workspace.fuss.git_mode {
+            return self.handle_fuss_git_key(key, mods);
+        }
+
         match (&key, &mods) {
             // Quit: Ctrl+Q (still works in fuss mode)
             (Key::Char('q'), Modifiers { ctrl: true, .. }) => {
@@ -3146,19 +3152,23 @@ impl Editor {
 
             // Exit fuss mode (Escape or F3)
             (Key::Escape, _) | (Key::F(3), _) => {
+                self.workspace.fuss.filter_clear();
                 self.workspace.fuss.deactivate();
             }
 
             // Navigation
-            (Key::Up, _) | (Key::Char('k'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Up, _) => {
+                self.workspace.fuss.filter_clear();
                 self.workspace.fuss.move_up();
             }
-            (Key::Down, _) | (Key::Char('j'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Down, _) => {
+                self.workspace.fuss.filter_clear();
                 self.workspace.fuss.move_down();
             }
 
             // Toggle expand/collapse directory, or collapse parent if on a file/collapsed dir
             (Key::Char(' '), _) => {
+                self.workspace.fuss.filter_clear();
                 if self.workspace.fuss.is_dir_selected() {
                     // If on a directory, toggle its expand state
                     self.workspace.fuss.toggle_expand();
@@ -3170,6 +3180,7 @@ impl Editor {
 
             // Expand directory (right arrow)
             (Key::Right, _) => {
+                self.workspace.fuss.filter_clear();
                 if self.workspace.fuss.is_dir_selected() {
                     // Only expand if not already expanded
                     if let Some(ref tree) = self.workspace.fuss.tree {
@@ -3185,6 +3196,7 @@ impl Editor {
 
             // Collapse directory or go to parent (left arrow)
             (Key::Left, _) => {
+                self.workspace.fuss.filter_clear();
                 let mut collapsed = false;
                 if self.workspace.fuss.is_dir_selected() {
                     // If on an expanded directory, collapse it
@@ -3205,7 +3217,8 @@ impl Editor {
             }
 
             // Open file or toggle directory
-            (Key::Enter, _) | (Key::Char('o'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Enter, _) => {
+                self.workspace.fuss.filter_clear();
                 if self.workspace.fuss.is_dir_selected() {
                     self.workspace.fuss.toggle_expand();
                 } else if let Some(path) = self.workspace.fuss.selected_file() {
@@ -3214,8 +3227,8 @@ impl Editor {
                 }
             }
 
-            // Toggle hidden files
-            (Key::Char('.'), _) => {
+            // Toggle hidden files: Alt+.
+            (Key::Char('.'), Modifiers { alt: true, .. }) => {
                 self.workspace.fuss.toggle_hidden();
             }
 
@@ -3228,13 +3241,8 @@ impl Editor {
                 self.workspace.fuss.toggle_hints();
             }
 
-            // Also allow 'h' for hints toggle as fallback
-            (Key::Char('h'), Modifiers { ctrl: false, alt: false, .. }) => {
-                self.workspace.fuss.toggle_hints();
-            }
-
-            // Open file in vertical split (v)
-            (Key::Char('v'), Modifiers { ctrl: false, alt: false, .. }) => {
+            // Open file in vertical split: Ctrl+V
+            (Key::Char('v'), Modifiers { ctrl: true, .. }) => {
                 if !self.workspace.fuss.is_dir_selected() {
                     if let Some(path) = self.workspace.fuss.selected_file() {
                         self.open_file_in_vsplit(&path)?;
@@ -3243,8 +3251,8 @@ impl Editor {
                 }
             }
 
-            // Open file in horizontal split (s)
-            (Key::Char('s'), Modifiers { ctrl: false, alt: false, .. }) => {
+            // Open file in horizontal split: Ctrl+S
+            (Key::Char('s'), Modifiers { ctrl: true, .. }) => {
                 if !self.workspace.fuss.is_dir_selected() {
                     if let Some(path) = self.workspace.fuss.selected_file() {
                         self.open_file_in_hsplit(&path)?;
@@ -3253,8 +3261,36 @@ impl Editor {
                 }
             }
 
+            // Enter git mode: Alt+G
+            (Key::Char('g'), Modifiers { alt: true, .. }) => {
+                self.workspace.fuss.enter_git_mode();
+                self.message = Some("Git: [a]dd [u]nstage [d]iff [m]sg [p]ush pu[l]l [f]etch [t]ag".to_string());
+            }
+
+            // Backspace: remove last filter character
+            (Key::Backspace, _) => {
+                self.workspace.fuss.filter_pop();
+            }
+
+            // Regular characters: add to filter for fuzzy jump
+            (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
+                self.workspace.fuss.filter_push(*c);
+            }
+
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle keys when in git sub-mode within fuss
+    fn handle_fuss_git_key(&mut self, key: Key, mods: Modifiers) -> Result<()> {
+        // Any key exits git mode (after potentially doing an action)
+        self.workspace.fuss.exit_git_mode();
+        self.message = None;
+
+        match (&key, &mods) {
             // Git: Stage file (a)
-            (Key::Char('a'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('a'), _) => {
                 if self.workspace.fuss.stage_selected() {
                     self.message = Some("Staged".to_string());
                 } else {
@@ -3263,7 +3299,7 @@ impl Editor {
             }
 
             // Git: Unstage file (u)
-            (Key::Char('u'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('u'), _) => {
                 if self.workspace.fuss.unstage_selected() {
                     self.message = Some("Unstaged".to_string());
                 } else {
@@ -3272,7 +3308,7 @@ impl Editor {
             }
 
             // Git: Show diff (d)
-            (Key::Char('d'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('d'), _) => {
                 if let Some((filename, diff)) = self.workspace.fuss.get_diff_for_selected() {
                     let display_name = format!("[diff] {}", filename);
                     self.workspace.open_content_tab(&diff, &display_name);
@@ -3283,7 +3319,7 @@ impl Editor {
             }
 
             // Git: Commit (m) - opens prompt for commit message
-            (Key::Char('m'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('m'), _) => {
                 self.prompt = PromptState::TextInput {
                     label: "Commit message: ".to_string(),
                     buffer: String::new(),
@@ -3293,25 +3329,25 @@ impl Editor {
             }
 
             // Git: Push (p)
-            (Key::Char('p'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('p'), _) => {
                 let (_, msg) = self.workspace.fuss.git_push();
                 self.message = Some(msg);
             }
 
             // Git: Pull (l)
-            (Key::Char('l'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('l'), _) => {
                 let (_, msg) = self.workspace.fuss.git_pull();
                 self.message = Some(msg);
             }
 
             // Git: Fetch (f)
-            (Key::Char('f'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('f'), _) => {
                 let (_, msg) = self.workspace.fuss.git_fetch();
                 self.message = Some(msg);
             }
 
             // Git: Tag (t) - opens prompt for tag name
-            (Key::Char('t'), Modifiers { ctrl: false, alt: false, .. }) => {
+            (Key::Char('t'), _) => {
                 self.prompt = PromptState::TextInput {
                     label: "Tag name: ".to_string(),
                     buffer: String::new(),
@@ -3320,6 +3356,7 @@ impl Editor {
                 self.message = Some("Enter tag name (Enter to create, Esc to cancel)".to_string());
             }
 
+            // Escape or any other key just cancels git mode
             _ => {}
         }
         Ok(())
