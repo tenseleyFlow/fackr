@@ -26,6 +26,14 @@ enum PromptState {
     RestoreBackup,
     /// Text input prompt (label, current input buffer)
     TextInput { label: String, buffer: String, action: TextInputAction },
+    /// LSP rename modal with original name shown
+    RenameModal {
+        original_name: String,
+        new_name: String,
+        path: String,
+        line: u32,
+        col: u32,
+    },
 }
 
 /// Action to perform when text input is complete
@@ -35,8 +43,6 @@ enum TextInputAction {
     GitCommit,
     /// Create a git tag
     GitTag,
-    /// LSP rename symbol
-    LspRename { path: String, line: u32, col: u32 },
 }
 
 /// LSP UI state
@@ -781,12 +787,18 @@ impl Editor {
                 String::new()
             };
 
-            self.prompt = PromptState::TextInput {
-                label: "Rename to: ".to_string(),
-                buffer: current_word.clone(),
-                action: TextInputAction::LspRename { path: path_str, line, col },
+            if current_word.is_empty() {
+                self.message = Some("No symbol under cursor".to_string());
+                return;
+            }
+
+            self.prompt = PromptState::RenameModal {
+                original_name: current_word.clone(),
+                new_name: current_word,
+                path: path_str,
+                line,
+                col,
             };
-            self.message = Some(format!("Rename '{}' to: {}", current_word, current_word));
         } else {
             self.message = Some("No file open".to_string());
         }
@@ -1154,6 +1166,11 @@ impl Editor {
             // Render server manager panel if visible (on top of everything)
             if self.server_manager.visible {
                 self.screen.render_server_manager_panel(&self.server_manager)?;
+            }
+
+            // Render rename modal if active
+            if let PromptState::RenameModal { ref original_name, ref new_name, .. } = self.prompt {
+                self.screen.render_rename_modal(original_name, new_name)?;
             }
 
             // After all overlays are rendered, reposition cursor to the correct location
@@ -3403,6 +3420,46 @@ impl Editor {
                     }
                 }
             }
+            PromptState::RenameModal { ref original_name, ref mut new_name, ref path, line, col } => {
+                match key {
+                    Key::Enter => {
+                        // Clone values before modifying self.prompt
+                        let original = original_name.clone();
+                        let new = new_name.clone();
+                        let path = path.clone();
+
+                        // Execute rename
+                        if new.is_empty() {
+                            self.prompt = PromptState::None;
+                            self.message = Some("Rename cancelled: empty name".to_string());
+                        } else if new == original {
+                            self.prompt = PromptState::None;
+                            self.message = Some("Rename cancelled: name unchanged".to_string());
+                        } else {
+                            self.prompt = PromptState::None;
+                            match self.workspace.lsp.request_rename(&path, line, col, &new) {
+                                Ok(_id) => {
+                                    self.message = Some(format!("Renaming '{}' to '{}'...", original, new));
+                                }
+                                Err(e) => {
+                                    self.message = Some(format!("Rename failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                        self.message = Some("Rename cancelled".to_string());
+                    }
+                    Key::Backspace => {
+                        new_name.pop();
+                    }
+                    Key::Char(c) => {
+                        new_name.push(c);
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -3417,22 +3474,6 @@ impl Editor {
             TextInputAction::GitTag => {
                 let (_, msg) = self.workspace.fuss.git_tag(buffer);
                 self.message = Some(msg);
-            }
-            TextInputAction::LspRename { path, line, col } => {
-                if buffer.is_empty() {
-                    self.message = Some("Rename cancelled: empty name".to_string());
-                    return;
-                }
-                match self.workspace.lsp.request_rename(&path, line, col, buffer) {
-                    Ok(_id) => {
-                        self.message = Some(format!("Renaming to '{}'...", buffer));
-                        // Note: The actual rename edits will be applied when we receive
-                        // the response and implement WorkspaceEdit handling
-                    }
-                    Err(e) => {
-                        self.message = Some(format!("Rename failed: {}", e));
-                    }
-                }
             }
         }
     }

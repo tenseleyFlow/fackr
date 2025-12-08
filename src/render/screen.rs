@@ -1838,6 +1838,115 @@ impl Screen {
         Ok(())
     }
 
+    /// Render a centered rename modal dialog
+    pub fn render_rename_modal(&mut self, original_name: &str, new_name: &str) -> Result<()> {
+        let (width, height) = (self.cols, self.rows);
+
+        // Calculate modal dimensions
+        let title = "Rename Symbol";
+        let from_label = "From: ";
+        let to_label = "To:   ";
+        let content_width = original_name.len().max(new_name.len()).max(20).max(title.len());
+        let modal_width = content_width + 8; // padding + border
+        let modal_height = 6; // title + from + to + bottom border + padding
+
+        // Center the modal
+        let start_col = ((width as usize).saturating_sub(modal_width)) / 2;
+        let start_row = ((height as usize).saturating_sub(modal_height)) / 2;
+
+        let bg = Color::AnsiValue(236);
+        let border_color = Color::AnsiValue(244);
+        let label_color = Color::AnsiValue(248);
+        let value_color = Color::White;
+        let input_bg = Color::AnsiValue(238);
+
+        // Draw top border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("┌{:─<width$}┐", "", width = modal_width - 2)),
+        )?;
+
+        // Draw title row
+        let title_padding = (modal_width - 2 - title.len()) / 2;
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16 + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            SetForegroundColor(Color::Cyan),
+            Print(format!("{:>pad$}{}{:<rpad$}", "", title, "", pad = title_padding, rpad = modal_width - 2 - title_padding - title.len())),
+            SetForegroundColor(border_color),
+            Print("│"),
+        )?;
+
+        // Draw separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16 + 2),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("├{:─<width$}┤", "", width = modal_width - 2)),
+        )?;
+
+        // Draw "From:" row
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16 + 3),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetForegroundColor(label_color),
+            Print(from_label),
+            SetForegroundColor(value_color),
+            Print(format!("{:<width$}", original_name, width = modal_width - 4 - from_label.len())),
+            SetForegroundColor(border_color),
+            Print(" │"),
+        )?;
+
+        // Draw "To:" row with input field
+        let input_width = modal_width - 4 - to_label.len();
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16 + 4),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetForegroundColor(label_color),
+            Print(to_label),
+            SetBackgroundColor(input_bg),
+            SetForegroundColor(Color::White),
+            Print(format!("{:<width$}", new_name, width = input_width)),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(" │"),
+        )?;
+
+        // Draw bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16 + 5),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("└{:─<width$}┘", "", width = modal_width - 2)),
+            ResetColor,
+        )?;
+
+        // Position cursor in the input field
+        let cursor_col = start_col + 2 + to_label.len() + new_name.len();
+        execute!(
+            self.stdout,
+            MoveTo(cursor_col as u16, start_row as u16 + 4),
+            SetBackgroundColor(input_bg),
+            crossterm::cursor::Show,
+        )?;
+
+        Ok(())
+    }
+
     /// Render the LSP server manager panel
     pub fn render_server_manager_panel(&mut self, panel: &ServerManagerPanel) -> Result<()> {
         if !panel.visible {
