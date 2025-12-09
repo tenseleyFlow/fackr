@@ -94,6 +94,8 @@ enum TextInputAction {
     GitCommit,
     /// Create a git tag
     GitTag,
+    /// Go to line (and optionally column)
+    GotoLine,
 }
 
 /// LSP UI state
@@ -1534,6 +1536,9 @@ impl Editor {
             // === File operations ===
             // Open file browser (Fortress mode): Ctrl+O
             (Key::Char('o'), Modifiers { ctrl: true, .. }) => self.open_fortress(),
+            // Go to line: Ctrl+G or F5
+            (Key::Char('g'), Modifiers { ctrl: true, .. }) |
+            (Key::F(5), _) => self.open_goto_line(),
 
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
@@ -3970,7 +3975,74 @@ impl Editor {
                 let (_, msg) = self.workspace.fuss.git_tag(buffer);
                 self.message = Some(msg);
             }
+            TextInputAction::GotoLine => {
+                self.goto_line_col(buffer);
+            }
         }
+    }
+
+    /// Open the goto line prompt
+    fn open_goto_line(&mut self) {
+        self.prompt = PromptState::TextInput {
+            label: "Go to line: ".to_string(),
+            buffer: String::new(),
+            action: TextInputAction::GotoLine,
+        };
+        self.message = Some("Go to line: ".to_string());
+    }
+
+    /// Parse line:col input and jump to position
+    fn goto_line_col(&mut self, input: &str) {
+        let input = input.trim();
+        if input.is_empty() {
+            return;
+        }
+
+        // Parse formats: "line", "line:", "line:col"
+        let (line_str, col_str) = if let Some(colon_pos) = input.find(':') {
+            (&input[..colon_pos], &input[colon_pos + 1..])
+        } else {
+            (input, "")
+        };
+
+        let line: usize = match line_str.parse::<usize>() {
+            Ok(n) if n > 0 => n - 1, // Convert to 0-indexed
+            Ok(_) => {
+                self.message = Some("Invalid line number".to_string());
+                return;
+            }
+            Err(_) => {
+                self.message = Some("Invalid line number".to_string());
+                return;
+            }
+        };
+
+        let col: usize = if col_str.is_empty() {
+            0
+        } else {
+            match col_str.parse::<usize>() {
+                Ok(n) if n > 0 => n - 1, // Convert to 0-indexed
+                Ok(_) => 0,
+                Err(_) => 0,
+            }
+        };
+
+        // Clamp to buffer bounds
+        let line_count = self.buffer().line_count();
+        let line = line.min(line_count.saturating_sub(1));
+        let line_len = self.buffer().line_len(line);
+        let col = col.min(line_len);
+
+        // Move cursor
+        self.cursor_mut().line = line;
+        self.cursor_mut().col = col;
+        self.cursor_mut().desired_col = col;
+        self.cursor_mut().clear_selection();
+
+        // Center the view on the target line
+        self.scroll_to_cursor();
+
+        self.message = Some(format!("Line {}, Column {}", line + 1, col + 1));
     }
 
     fn restore_backups(&mut self) -> Result<()> {
