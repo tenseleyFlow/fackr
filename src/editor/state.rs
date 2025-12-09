@@ -22,6 +22,17 @@ enum FindReplaceField {
     Replace,
 }
 
+/// Entry in the fortress file explorer
+#[derive(Debug, Clone, PartialEq)]
+struct FortressEntry {
+    /// File/directory name
+    name: String,
+    /// Full path
+    path: PathBuf,
+    /// Is this a directory?
+    is_dir: bool,
+}
+
 /// Prompt state for quit confirmation
 #[derive(Debug, Clone, PartialEq)]
 enum PromptState {
@@ -60,6 +71,19 @@ enum PromptState {
         case_insensitive: bool,
         /// Regex mode
         regex_mode: bool,
+    },
+    /// Fortress mode - file explorer modal
+    Fortress {
+        /// Current directory being browsed
+        current_path: PathBuf,
+        /// Directory entries (directories first, then files)
+        entries: Vec<FortressEntry>,
+        /// Currently selected index
+        selected_index: usize,
+        /// Filter/search query
+        filter: String,
+        /// Scroll offset for long lists
+        scroll_offset: usize,
     },
 }
 
@@ -1236,6 +1260,29 @@ impl Editor {
                 self.screen.render_references_panel(locations, selected_index, query, &self.workspace.root)?;
             }
 
+            // Render fortress modal if active
+            if let PromptState::Fortress {
+                ref current_path,
+                ref entries,
+                selected_index,
+                ref filter,
+                scroll_offset,
+            } = self.prompt {
+                // Convert entries to tuple format for render function
+                let entries_tuples: Vec<(String, PathBuf, bool)> = entries
+                    .iter()
+                    .map(|e| (e.name.clone(), e.path.clone(), e.is_dir))
+                    .collect();
+                self.screen.render_fortress_modal(
+                    current_path,
+                    &entries_tuples,
+                    selected_index,
+                    filter,
+                    scroll_offset,
+                )?;
+                return Ok(()); // Modal handles cursor
+            }
+
             // Render find/replace bar if active (replaces status bar)
             if let PromptState::FindReplace {
                 ref find_query,
@@ -1483,6 +1530,10 @@ impl Editor {
             (Key::F(3), Modifiers { shift: false, .. }) => self.find_next(),
             // Find previous: Shift+F3
             (Key::F(3), Modifiers { shift: true, .. }) => self.find_prev(),
+
+            // === File operations ===
+            // Open file browser (Fortress mode): Ctrl+O
+            (Key::Char('o'), Modifiers { ctrl: true, .. }) => self.open_fortress(),
 
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
@@ -2260,58 +2311,57 @@ impl Editor {
             return;
         }
 
-        // Multi-cursor: process from bottom-right to top-left to maintain correct positions.
-        // This ordering ensures that when we insert text, we don't affect the character indices
-        // of cursors we haven't processed yet (they're all earlier in the document).
-        //
-        // Collect original cursor positions with indices
-        let mut positions: Vec<(usize, usize, usize)> = self.cursors().all()
+        // Multi-cursor: compute absolute character indices FIRST from a frozen view of the buffer.
+        // Then sort by ASCENDING char index, apply edits from start to end,
+        // and track cumulative offset to adjust subsequent positions.
+
+        // Step 1: Compute char indices for all cursors from current buffer state
+        let mut cursor_char_indices: Vec<(usize, usize)> = self.cursors().all()
             .iter()
             .enumerate()
-            .map(|(i, c)| (i, c.line, c.col))
+            .map(|(i, c)| {
+                let char_idx = self.buffer().line_col_to_char(c.line, c.col);
+                (i, char_idx)
+            })
             .collect();
 
-        // Sort by position, bottom-right first (highest line, then highest col)
-        positions.sort_by(|a, b| {
-            match b.1.cmp(&a.1) {
-                std::cmp::Ordering::Equal => b.2.cmp(&a.2),
-                ord => ord,
-            }
-        });
+        // Step 2: Sort by ASCENDING char index (process from start of document)
+        cursor_char_indices.sort_by(|a, b| a.1.cmp(&b.1));
 
         // Record all cursor positions before the operation
         let cursors_before = self.all_cursor_positions();
         self.history_mut().begin_group();
         self.history_mut().set_cursors_before(cursors_before);
 
-        // Count newlines and chars for position updates
-        let newlines = text.chars().filter(|&c| c == '\n').count();
         let text_char_count = text.chars().count();
-        let chars_after_last_newline = if let Some(pos) = text.rfind('\n') {
-            text[pos + 1..].chars().count()
-        } else {
-            text_char_count
-        };
-
         let cursor_before = self.cursor_pos();
 
-        // Process each cursor using the ORIGINAL positions we captured.
-        // Since we go bottom-right to top-left, insertions don't affect positions we'll use later.
-        for (cursor_idx, orig_line, orig_col) in positions.iter().copied() {
-            let idx = self.buffer().line_col_to_char(orig_line, orig_col);
-            self.buffer_mut().insert(idx, text);
-            self.history_mut().record_insert(idx, text.to_string(), cursor_before, cursor_before);
+        // Step 3: Apply inserts from start to end, tracking cumulative offset
+        let mut cumulative_offset: usize = 0;
+        let mut new_positions: Vec<(usize, usize, usize)> = Vec::new(); // (cursor_idx, line, col)
 
-            // Update this cursor's final position
+        for (cursor_idx, original_char_idx) in cursor_char_indices {
+            // Adjust position by cumulative offset from previous inserts
+            let adjusted_char_idx = original_char_idx + cumulative_offset;
+
+            self.buffer_mut().insert(adjusted_char_idx, text);
+            self.history_mut().record_insert(adjusted_char_idx, text.to_string(), cursor_before, cursor_before);
+
+            // New cursor position is right after the inserted text
+            let new_char_idx = adjusted_char_idx + text_char_count;
+            let (new_line, new_col) = self.buffer().char_to_line_col(new_char_idx);
+            new_positions.push((cursor_idx, new_line, new_col));
+
+            // Update cumulative offset for next cursor
+            cumulative_offset += text_char_count;
+        }
+
+        // Step 4: Update all cursor positions at once
+        for (cursor_idx, new_line, new_col) in new_positions {
             let cursor = &mut self.cursors_mut().all_mut()[cursor_idx];
-            if newlines > 0 {
-                cursor.line = orig_line + newlines;
-                cursor.col = chars_after_last_newline;
-            } else {
-                cursor.line = orig_line;
-                cursor.col = orig_col + text_char_count;
-            }
-            cursor.desired_col = cursor.col;
+            cursor.line = new_line;
+            cursor.col = new_col;
+            cursor.desired_col = new_col;
         }
 
         // Record all cursor positions after the operation
@@ -2463,20 +2513,21 @@ impl Editor {
 
     /// Delete backward at all cursor positions (multi-cursor)
     fn delete_backward_multi(&mut self) {
-        // Collect cursor positions, process from bottom to top
-        let mut positions: Vec<(usize, usize, usize)> = self.cursors().all()
+        // Multi-cursor: compute absolute character indices FIRST from a frozen view of the buffer.
+        // Sort by ASCENDING, process start to end, track cumulative offset.
+
+        // Step 1: Compute char indices for all cursors from current buffer state
+        let mut cursor_char_indices: Vec<(usize, usize)> = self.cursors().all()
             .iter()
             .enumerate()
-            .map(|(i, c)| (i, c.line, c.col))
+            .map(|(i, c)| {
+                let char_idx = self.buffer().line_col_to_char(c.line, c.col);
+                (i, char_idx)
+            })
             .collect();
 
-        // Sort by position, bottom-right first
-        positions.sort_by(|a, b| {
-            match b.1.cmp(&a.1) {
-                std::cmp::Ordering::Equal => b.2.cmp(&a.2),
-                ord => ord,
-            }
-        });
+        // Step 2: Sort by ASCENDING char index (process from start of document)
+        cursor_char_indices.sort_by(|a, b| a.1.cmp(&b.1));
 
         // Record all cursor positions before the operation
         let cursors_before = self.all_cursor_positions();
@@ -2484,19 +2535,43 @@ impl Editor {
         self.history_mut().set_cursors_before(cursors_before);
 
         let cursor_before = self.cursor_pos();
-        for (cursor_idx, line, col) in positions {
-            if col > 0 {
-                let idx = self.buffer().line_col_to_char(line, col);
-                let deleted = self.buffer().char_at(idx - 1).map(|c| c.to_string()).unwrap_or_default();
-                self.buffer_mut().delete(idx - 1, idx);
-                self.history_mut().record_delete(idx - 1, deleted, cursor_before, cursor_before);
 
-                // Update cursor position
-                let cursor = &mut self.cursors_mut().all_mut()[cursor_idx];
-                cursor.col -= 1;
-                cursor.desired_col = cursor.col;
+        // Step 3: Apply deletes from start to end, tracking cumulative offset
+        let mut cumulative_offset: isize = 0;
+        let mut new_positions: Vec<(usize, usize, usize)> = Vec::new();
+
+        for (cursor_idx, original_char_idx) in cursor_char_indices {
+            if original_char_idx == 0 {
+                // Can't delete backward from position 0, keep cursor where it is
+                let cursor = &self.cursors().all()[cursor_idx];
+                new_positions.push((cursor_idx, cursor.line, cursor.col));
+                continue;
             }
-            // Note: For simplicity, we don't handle joining lines in multi-cursor mode
+
+            // Adjust position by cumulative offset from previous deletes
+            let adjusted_char_idx = (original_char_idx as isize + cumulative_offset) as usize;
+
+            if adjusted_char_idx > 0 {
+                let deleted = self.buffer().char_at(adjusted_char_idx - 1).map(|c| c.to_string()).unwrap_or_default();
+                self.buffer_mut().delete(adjusted_char_idx - 1, adjusted_char_idx);
+                self.history_mut().record_delete(adjusted_char_idx - 1, deleted, cursor_before, cursor_before);
+
+                // New cursor position is at the delete point
+                let new_char_idx = adjusted_char_idx - 1;
+                let (new_line, new_col) = self.buffer().char_to_line_col(new_char_idx);
+                new_positions.push((cursor_idx, new_line, new_col));
+
+                // Update cumulative offset (we deleted 1 char, so offset decreases by 1)
+                cumulative_offset -= 1;
+            }
+        }
+
+        // Step 4: Update all cursor positions at once
+        for (cursor_idx, new_line, new_col) in new_positions {
+            let cursor = &mut self.cursors_mut().all_mut()[cursor_idx];
+            cursor.line = new_line;
+            cursor.col = new_col;
+            cursor.desired_col = new_col;
         }
 
         // Record all cursor positions after the operation
@@ -2508,20 +2583,23 @@ impl Editor {
 
     /// Delete forward at all cursor positions (multi-cursor)
     fn delete_forward_multi(&mut self) {
-        // Collect cursor positions, process from bottom to top
-        let mut positions: Vec<(usize, usize, usize)> = self.cursors().all()
+        // Multi-cursor: compute absolute character indices FIRST from a frozen view of the buffer.
+        // Sort by ASCENDING, process start to end, track cumulative offset.
+
+        let total_chars = self.buffer().char_count();
+
+        // Step 1: Compute char indices for all cursors from current buffer state
+        let mut cursor_char_indices: Vec<(usize, usize)> = self.cursors().all()
             .iter()
             .enumerate()
-            .map(|(i, c)| (i, c.line, c.col))
+            .map(|(i, c)| {
+                let char_idx = self.buffer().line_col_to_char(c.line, c.col);
+                (i, char_idx)
+            })
             .collect();
 
-        // Sort by position, bottom-right first
-        positions.sort_by(|a, b| {
-            match b.1.cmp(&a.1) {
-                std::cmp::Ordering::Equal => b.2.cmp(&a.2),
-                ord => ord,
-            }
-        });
+        // Step 2: Sort by ASCENDING char index (process from start of document)
+        cursor_char_indices.sort_by(|a, b| a.1.cmp(&b.1));
 
         // Record all cursor positions before the operation
         let cursors_before = self.all_cursor_positions();
@@ -2529,16 +2607,37 @@ impl Editor {
         self.history_mut().set_cursors_before(cursors_before);
 
         let cursor_before = self.cursor_pos();
-        for (_cursor_idx, line, col) in positions {
-            let line_len = self.buffer().line_len(line);
-            if col < line_len {
-                let idx = self.buffer().line_col_to_char(line, col);
-                let deleted = self.buffer().char_at(idx).map(|c| c.to_string()).unwrap_or_default();
-                self.buffer_mut().delete(idx, idx + 1);
-                self.history_mut().record_delete(idx, deleted, cursor_before, cursor_before);
-                // Cursor position doesn't change for delete forward
+
+        // Step 3: Apply deletes from start to end, tracking cumulative offset
+        let mut cumulative_offset: isize = 0;
+        let mut new_positions: Vec<(usize, usize, usize)> = Vec::new();
+
+        for (cursor_idx, original_char_idx) in cursor_char_indices {
+            // Adjust position by cumulative offset from previous deletes
+            let adjusted_char_idx = (original_char_idx as isize + cumulative_offset) as usize;
+            let current_total = (total_chars as isize + cumulative_offset) as usize;
+
+            if adjusted_char_idx < current_total {
+                let deleted = self.buffer().char_at(adjusted_char_idx).map(|c| c.to_string()).unwrap_or_default();
+                // Don't delete newlines in multi-cursor mode for simplicity
+                if deleted != "\n" {
+                    self.buffer_mut().delete(adjusted_char_idx, adjusted_char_idx + 1);
+                    self.history_mut().record_delete(adjusted_char_idx, deleted, cursor_before, cursor_before);
+                    cumulative_offset -= 1;
+                }
             }
-            // Note: For simplicity, we don't handle joining lines in multi-cursor mode
+
+            // Cursor position: convert from adjusted char index (cursor doesn't move for delete forward)
+            let (new_line, new_col) = self.buffer().char_to_line_col(adjusted_char_idx.min(self.buffer().char_count()));
+            new_positions.push((cursor_idx, new_line, new_col));
+        }
+
+        // Step 4: Update all cursor positions at once
+        for (cursor_idx, new_line, new_col) in new_positions {
+            let cursor = &mut self.cursors_mut().all_mut()[cursor_idx];
+            cursor.line = new_line;
+            cursor.col = new_col;
+            cursor.desired_col = new_col;
         }
 
         // Record all cursor positions after the operation
@@ -3753,6 +3852,109 @@ impl Editor {
                     _ => {}
                 }
             }
+            PromptState::Fortress {
+                ref current_path,
+                ref entries,
+                ref mut selected_index,
+                ref mut filter,
+                ref mut scroll_offset,
+            } => {
+                // Filter entries based on query
+                let filtered: Vec<(usize, &FortressEntry)> = if filter.is_empty() {
+                    entries.iter().enumerate().collect()
+                } else {
+                    let f = filter.to_lowercase();
+                    entries.iter().enumerate()
+                        .filter(|(_, e)| e.name.to_lowercase().contains(&f))
+                        .collect()
+                };
+
+                match key {
+                    Key::Enter => {
+                        // Open selected entry
+                        if let Some((orig_idx, _entry)) = filtered.get(*selected_index) {
+                            let entry = entries[*orig_idx].clone();
+                            if entry.is_dir {
+                                // Navigate into directory
+                                self.fortress_navigate_to(&entry.path);
+                            } else {
+                                // Open the file
+                                self.prompt = PromptState::None;
+                                self.fortress_open_file(&entry.path);
+                            }
+                        }
+                    }
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                        self.message = None;
+                    }
+                    Key::Backspace if filter.is_empty() => {
+                        // Go up one directory when filter is empty
+                        if let Some(parent) = current_path.parent() {
+                            let parent = parent.to_path_buf();
+                            self.fortress_navigate_to(&parent);
+                        }
+                    }
+                    Key::Backspace => {
+                        filter.pop();
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    Key::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            // Adjust scroll
+                            if *selected_index < *scroll_offset {
+                                *scroll_offset = *selected_index;
+                            }
+                        }
+                    }
+                    Key::Down => {
+                        if *selected_index + 1 < filtered.len() {
+                            *selected_index += 1;
+                        }
+                    }
+                    Key::Left => {
+                        // Go up one directory
+                        if let Some(parent) = current_path.parent() {
+                            let parent = parent.to_path_buf();
+                            self.fortress_navigate_to(&parent);
+                        }
+                    }
+                    Key::Right => {
+                        // Enter selected directory (same as Enter for dirs)
+                        if let Some((orig_idx, _)) = filtered.get(*selected_index) {
+                            let entry = entries[*orig_idx].clone();
+                            if entry.is_dir {
+                                self.fortress_navigate_to(&entry.path);
+                            }
+                        }
+                    }
+                    Key::PageUp => {
+                        *selected_index = selected_index.saturating_sub(10);
+                        *scroll_offset = scroll_offset.saturating_sub(10);
+                    }
+                    Key::PageDown => {
+                        let max = filtered.len().saturating_sub(1);
+                        *selected_index = (*selected_index + 10).min(max);
+                    }
+                    Key::Home => {
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    Key::End => {
+                        if !filtered.is_empty() {
+                            *selected_index = filtered.len() - 1;
+                        }
+                    }
+                    Key::Char(c) => {
+                        filter.push(c);
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -4160,6 +4362,106 @@ impl Editor {
             };
             self.search_state.last_query.clear(); // Force re-search
             self.update_search_matches();
+        }
+    }
+
+    // === Fortress mode (file browser) ===
+
+    /// Open fortress mode file browser
+    fn open_fortress(&mut self) {
+        // Start at current file's directory, or workspace root
+        let start_path = if let Some(path) = self.current_file_path() {
+            if let Some(parent) = path.parent() {
+                parent.to_path_buf()
+            } else {
+                self.workspace.root.clone()
+            }
+        } else {
+            self.workspace.root.clone()
+        };
+
+        let entries = self.read_directory(&start_path);
+        self.prompt = PromptState::Fortress {
+            current_path: start_path,
+            entries,
+            selected_index: 0,
+            filter: String::new(),
+            scroll_offset: 0,
+        };
+    }
+
+    /// Read directory contents and return sorted entries (dirs first, then files)
+    fn read_directory(&self, path: &Path) -> Vec<FortressEntry> {
+        let mut entries = Vec::new();
+
+        // Add parent directory entry if not at root
+        if path.parent().is_some() {
+            entries.push(FortressEntry {
+                name: "..".to_string(),
+                path: path.parent().unwrap().to_path_buf(),
+                is_dir: true,
+            });
+        }
+
+        if let Ok(read_dir) = std::fs::read_dir(path) {
+            let mut dirs = Vec::new();
+            let mut files = Vec::new();
+
+            for entry in read_dir.flatten() {
+                let entry_path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                // Skip hidden files (starting with .)
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                let is_dir = entry_path.is_dir();
+                let fortress_entry = FortressEntry {
+                    name,
+                    path: entry_path,
+                    is_dir,
+                };
+
+                if is_dir {
+                    dirs.push(fortress_entry);
+                } else {
+                    files.push(fortress_entry);
+                }
+            }
+
+            // Sort alphabetically (case-insensitive)
+            dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+            // Directories first, then files
+            entries.extend(dirs);
+            entries.extend(files);
+        }
+
+        entries
+    }
+
+    /// Navigate to a new directory in fortress mode
+    fn fortress_navigate_to(&mut self, path: &Path) {
+        let entries = self.read_directory(path);
+        self.prompt = PromptState::Fortress {
+            current_path: path.to_path_buf(),
+            entries,
+            selected_index: 0,
+            filter: String::new(),
+            scroll_offset: 0,
+        };
+    }
+
+    /// Open a file from fortress mode
+    fn fortress_open_file(&mut self, path: &Path) {
+        // Open file in current pane by reusing workspace method
+        if let Err(e) = self.workspace.open_file(path) {
+            self.message = Some(format!("Failed to open file: {}", e));
+        } else {
+            // Sync with LSP
+            self.sync_document_to_lsp();
         }
     }
 }

@@ -2101,6 +2101,183 @@ impl Screen {
         Ok(())
     }
 
+    /// Render the Fortress file browser modal
+    pub fn render_fortress_modal(
+        &mut self,
+        current_path: &std::path::Path,
+        entries: &[(String, std::path::PathBuf, bool)], // (name, path, is_dir)
+        selected_index: usize,
+        filter: &str,
+        scroll_offset: usize,
+    ) -> Result<()> {
+        let (width, height) = (self.cols as usize, self.rows as usize);
+
+        // Modal dimensions - centered
+        let modal_width = 60.min(width - 4);
+        let modal_height = 20.min(height - 4);
+        let start_col = (width.saturating_sub(modal_width)) / 2;
+        let start_row = (height.saturating_sub(modal_height)) / 2;
+
+        // Filter entries based on query
+        let filtered: Vec<(usize, &(String, std::path::PathBuf, bool))> = if filter.is_empty() {
+            entries.iter().enumerate().collect()
+        } else {
+            let f = filter.to_lowercase();
+            entries.iter().enumerate()
+                .filter(|(_, (name, _, _))| name.to_lowercase().contains(&f))
+                .collect()
+        };
+
+        // Colors
+        let bg = Color::AnsiValue(235);
+        let border_color = Color::AnsiValue(244);
+        let header_color = Color::Cyan;
+        let dir_color = Color::Blue;
+        let file_color = Color::AnsiValue(252);
+        let selected_bg = Color::AnsiValue(240);
+        let input_bg = Color::AnsiValue(238);
+
+        // Draw top border with title
+        let path_str = current_path.to_string_lossy();
+        let max_path_len = modal_width - 6;
+        let display_path = if path_str.len() > max_path_len {
+            format!("...{}", &path_str[path_str.len().saturating_sub(max_path_len - 3)..])
+        } else {
+            path_str.to_string()
+        };
+        let title = format!(" {} ", display_path);
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("┌"),
+            SetForegroundColor(header_color),
+            Print(&title),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}┐", "", width = modal_width.saturating_sub(title.len() + 2))),
+            ResetColor,
+        )?;
+
+        // Draw filter input row
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 1) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetForegroundColor(Color::AnsiValue(248)),
+            Print("Filter: "),
+            SetBackgroundColor(input_bg),
+            SetForegroundColor(Color::White),
+            Print(format!("{:<width$}", filter, width = modal_width.saturating_sub(12))),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│"),
+            ResetColor,
+        )?;
+
+        // Draw separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 2) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("├{:─<width$}┤", "", width = modal_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Calculate visible range
+        let visible_rows = modal_height.saturating_sub(5); // Account for borders, title, filter, help
+
+        // Adjust scroll offset so selected item is visible
+        let scroll = if selected_index < scroll_offset {
+            selected_index
+        } else if selected_index >= scroll_offset + visible_rows {
+            selected_index - visible_rows + 1
+        } else {
+            scroll_offset
+        };
+
+        // Draw file/directory entries
+        for (display_idx, (_orig_idx, (name, _, is_dir))) in filtered.iter().enumerate().skip(scroll).take(visible_rows) {
+            let row = (start_row + 3 + display_idx - scroll) as u16;
+            let is_selected = display_idx == selected_index;
+
+            let item_bg = if is_selected { selected_bg } else { bg };
+            let name_color = if *is_dir { dir_color } else { file_color };
+            let icon = if *is_dir { "[d] " } else { "    " };
+
+            // Truncate name if needed
+            let max_name_len = modal_width.saturating_sub(6);
+            let display_name = if name.len() > max_name_len {
+                format!("{}...", &name[..max_name_len - 3])
+            } else {
+                name.clone()
+            };
+
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(item_bg),
+                SetForegroundColor(border_color),
+                Print("│ "),
+                Print(icon),
+                SetForegroundColor(name_color),
+                Print(format!("{:<width$}", display_name, width = modal_width.saturating_sub(6))),
+                SetForegroundColor(border_color),
+                Print("│"),
+                ResetColor,
+            )?;
+        }
+
+        // Fill remaining rows with empty space
+        let items_drawn = filtered.len().saturating_sub(scroll).min(visible_rows);
+        for i in items_drawn..visible_rows {
+            let row = (start_row + 3 + i) as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(bg),
+                SetForegroundColor(border_color),
+                Print(format!("│{:width$}│", "", width = modal_width.saturating_sub(2))),
+                ResetColor,
+            )?;
+        }
+
+        // Draw help text row
+        let help_row = (start_row + 3 + visible_rows) as u16;
+        let help_text = "←:up  →/Enter:open  ↑↓:nav  Esc:close";
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("├"),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!(" {:<width$}", help_text, width = modal_width.saturating_sub(3))),
+            SetForegroundColor(border_color),
+            Print("┤"),
+            ResetColor,
+        )?;
+
+        // Draw bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("└{:─<width$}┘", "", width = modal_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Hide cursor when in fortress modal
+        execute!(self.stdout, Hide)?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+
     /// Render the LSP references panel (sidebar style)
     pub fn render_references_panel(
         &mut self,
