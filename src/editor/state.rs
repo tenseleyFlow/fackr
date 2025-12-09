@@ -15,6 +15,13 @@ use super::{Cursor, Cursors, History, Operation, Position};
 /// How often to write backups (debounce interval)
 const BACKUP_INTERVAL_SECS: u64 = 5;
 
+/// Which input field is active in find/replace
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FindReplaceField {
+    Find,
+    Replace,
+}
+
 /// Prompt state for quit confirmation
 #[derive(Debug, Clone, PartialEq)]
 enum PromptState {
@@ -40,6 +47,19 @@ enum PromptState {
         selected_index: usize,
         /// Search query being typed (for filtering)
         query: String,
+    },
+    /// Find/Replace dialog in status bar
+    FindReplace {
+        /// Search query
+        find_query: String,
+        /// Replacement text
+        replace_text: String,
+        /// Which field is active
+        active_field: FindReplaceField,
+        /// Case insensitive search
+        case_insensitive: bool,
+        /// Regex mode
+        regex_mode: bool,
     },
 }
 
@@ -80,6 +100,28 @@ struct LspState {
     last_synced_path: Option<PathBuf>,
 }
 
+/// A search match position
+#[derive(Debug, Clone, PartialEq)]
+struct SearchMatch {
+    line: usize,
+    start_col: usize,
+    end_col: usize,
+}
+
+/// Search state for find/replace
+#[derive(Debug, Default)]
+struct SearchState {
+    /// All matches in the current buffer
+    matches: Vec<SearchMatch>,
+    /// Current match index (which one is "active")
+    current_match: usize,
+    /// Last search query (to detect changes)
+    last_query: String,
+    /// Last search settings
+    last_case_insensitive: bool,
+    last_regex: bool,
+}
+
 /// Main editor state
 pub struct Editor {
     /// The workspace (owns tabs, panes, fuss mode, and config)
@@ -104,6 +146,8 @@ pub struct Editor {
     lsp_state: LspState,
     /// LSP server manager panel
     server_manager: ServerManagerPanel,
+    /// Search state for find/replace
+    search_state: SearchState,
 }
 
 impl Editor {
@@ -147,6 +191,7 @@ impl Editor {
             last_backup: Instant::now(),
             lsp_state: LspState::default(),
             server_manager: ServerManagerPanel::new(),
+            search_state: SearchState::default(),
         };
 
         // If there are backups, show restore prompt
@@ -1191,6 +1236,28 @@ impl Editor {
                 self.screen.render_references_panel(locations, selected_index, query, &self.workspace.root)?;
             }
 
+            // Render find/replace bar if active (replaces status bar)
+            if let PromptState::FindReplace {
+                ref find_query,
+                ref replace_text,
+                active_field,
+                case_insensitive,
+                regex_mode,
+            } = self.prompt {
+                let is_find_active = active_field == FindReplaceField::Find;
+                self.screen.render_find_replace_bar(
+                    find_query,
+                    replace_text,
+                    is_find_active,
+                    case_insensitive,
+                    regex_mode,
+                    self.search_state.matches.len(),
+                    self.search_state.current_match,
+                    fuss_width,
+                )?;
+                return Ok(()); // Skip cursor repositioning, bar handles it
+            }
+
             // After all overlays are rendered, reposition cursor to the correct location
             // (overlays may have moved the terminal cursor position)
             let cursor = cursors.primary();
@@ -1205,6 +1272,37 @@ impl Editor {
     }
 
     fn handle_key_with_mods(&mut self, key: Key, mods: Modifiers) -> Result<()> {
+        // Handle Ctrl+F/Ctrl+R specially - they can toggle/switch even when in FindReplace prompt
+        if let PromptState::FindReplace { .. } = &self.prompt {
+            match (&key, &mods) {
+                (Key::Char('f'), Modifiers { ctrl: true, .. }) => {
+                    self.open_find();
+                    return Ok(());
+                }
+                (Key::Char('r'), Modifiers { ctrl: true, .. }) => {
+                    self.open_replace();
+                    return Ok(());
+                }
+                // Alt+I: toggle case insensitivity
+                (Key::Char('i'), Modifiers { alt: true, .. }) => {
+                    self.toggle_case_sensitivity();
+                    return Ok(());
+                }
+                // Alt+X: toggle regex mode
+                (Key::Char('x'), Modifiers { alt: true, .. }) => {
+                    self.toggle_regex_mode();
+                    return Ok(());
+                }
+                // Alt+Enter or Ctrl+Shift+Enter: replace all
+                (Key::Enter, Modifiers { alt: true, .. }) |
+                (Key::Enter, Modifiers { ctrl: true, shift: true, .. }) => {
+                    self.replace_all();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Handle active prompts first
         if self.prompt != PromptState::None {
             return self.handle_prompt_key(key);
@@ -1374,6 +1472,17 @@ impl Editor {
             (Key::Char('l'), Modifiers { ctrl: true, .. }) => self.select_line(),
             // Select word: Ctrl+D (select word at cursor, or next occurrence if already selected)
             (Key::Char('d'), Modifiers { ctrl: true, .. }) => self.select_word(),
+
+            // === Find/Replace ===
+            // Find: Ctrl+F
+            (Key::Char('f'), Modifiers { ctrl: true, .. }) => self.open_find(),
+            // Replace: Ctrl+R (or Ctrl+H for compatibility)
+            (Key::Char('r'), Modifiers { ctrl: true, .. }) |
+            (Key::Char('h'), Modifiers { ctrl: true, alt: true, .. }) => self.open_replace(),
+            // Find next: F3
+            (Key::F(3), Modifiers { shift: false, .. }) => self.find_next(),
+            // Find previous: Shift+F3
+            (Key::F(3), Modifiers { shift: true, .. }) => self.find_prev(),
 
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
@@ -3577,6 +3686,73 @@ impl Editor {
                     _ => {}
                 }
             }
+            PromptState::FindReplace {
+                ref mut find_query,
+                ref mut replace_text,
+                ref mut active_field,
+                case_insensitive: _,
+                regex_mode: _,
+            } => {
+                match key {
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                        self.search_state.matches.clear();
+                        self.message = None;
+                    }
+                    Key::Enter => {
+                        if *active_field == FindReplaceField::Find {
+                            // Find next
+                            self.find_next();
+                        } else {
+                            // Replace current and find next
+                            self.replace_current();
+                        }
+                    }
+                    Key::Tab => {
+                        // Switch between find and replace fields
+                        *active_field = if *active_field == FindReplaceField::Find {
+                            FindReplaceField::Replace
+                        } else {
+                            FindReplaceField::Find
+                        };
+                    }
+                    Key::BackTab => {
+                        // Switch in reverse
+                        *active_field = if *active_field == FindReplaceField::Replace {
+                            FindReplaceField::Find
+                        } else {
+                            FindReplaceField::Replace
+                        };
+                    }
+                    Key::Up => {
+                        // Find previous
+                        self.find_prev();
+                    }
+                    Key::Down => {
+                        // Find next
+                        self.find_next();
+                    }
+                    Key::Backspace => {
+                        if *active_field == FindReplaceField::Find {
+                            find_query.pop();
+                            self.search_state.last_query.clear(); // Force re-search
+                            self.update_search_matches();
+                        } else {
+                            replace_text.pop();
+                        }
+                    }
+                    Key::Char(c) => {
+                        if *active_field == FindReplaceField::Find {
+                            find_query.push(c);
+                            self.search_state.last_query.clear(); // Force re-search
+                            self.update_search_matches();
+                        } else {
+                            replace_text.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -3640,6 +3816,351 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    // ========== Find/Replace Methods ==========
+
+    /// Open the find dialog (or toggle if already open on find field)
+    fn open_find(&mut self) {
+        match &self.prompt {
+            PromptState::FindReplace { active_field: FindReplaceField::Find, .. } => {
+                // Already in find mode with find field active - close
+                self.prompt = PromptState::None;
+                self.search_state.matches.clear();
+            }
+            PromptState::FindReplace { find_query, replace_text, case_insensitive, regex_mode, .. } => {
+                // In find/replace but on replace field - switch to find
+                self.prompt = PromptState::FindReplace {
+                    find_query: find_query.clone(),
+                    replace_text: replace_text.clone(),
+                    active_field: FindReplaceField::Find,
+                    case_insensitive: *case_insensitive,
+                    regex_mode: *regex_mode,
+                };
+            }
+            _ => {
+                // Open fresh find dialog, possibly with selected text
+                let initial_query = self.get_selection_text().unwrap_or_default();
+                self.prompt = PromptState::FindReplace {
+                    find_query: initial_query,
+                    replace_text: String::new(),
+                    active_field: FindReplaceField::Find,
+                    case_insensitive: false,
+                    regex_mode: false,
+                };
+                self.update_search_matches();
+            }
+        }
+    }
+
+    /// Open the replace dialog (or switch to replace field, or close if already on replace)
+    fn open_replace(&mut self) {
+        match &self.prompt {
+            PromptState::FindReplace { active_field: FindReplaceField::Replace, .. } => {
+                // Already in replace mode with replace field active - close
+                self.prompt = PromptState::None;
+                self.search_state.matches.clear();
+            }
+            PromptState::FindReplace { find_query, replace_text, case_insensitive, regex_mode, .. } => {
+                // In find/replace but on find field - switch to replace
+                self.prompt = PromptState::FindReplace {
+                    find_query: find_query.clone(),
+                    replace_text: replace_text.clone(),
+                    active_field: FindReplaceField::Replace,
+                    case_insensitive: *case_insensitive,
+                    regex_mode: *regex_mode,
+                };
+            }
+            _ => {
+                // Open find/replace with replace field active
+                let initial_query = self.get_selection_text().unwrap_or_default();
+                self.prompt = PromptState::FindReplace {
+                    find_query: initial_query,
+                    replace_text: String::new(),
+                    active_field: FindReplaceField::Replace,
+                    case_insensitive: false,
+                    regex_mode: false,
+                };
+                self.update_search_matches();
+            }
+        }
+    }
+
+    /// Update search matches based on current query
+    fn update_search_matches(&mut self) {
+        let (query, case_insensitive, regex_mode) = match &self.prompt {
+            PromptState::FindReplace { find_query, case_insensitive, regex_mode, .. } => {
+                (find_query.clone(), *case_insensitive, *regex_mode)
+            }
+            _ => return,
+        };
+
+        // Check if we need to update (query or settings changed)
+        if query == self.search_state.last_query
+            && case_insensitive == self.search_state.last_case_insensitive
+            && regex_mode == self.search_state.last_regex
+        {
+            return;
+        }
+
+        self.search_state.last_query = query.clone();
+        self.search_state.last_case_insensitive = case_insensitive;
+        self.search_state.last_regex = regex_mode;
+        self.search_state.matches.clear();
+        self.search_state.current_match = 0;
+
+        if query.is_empty() {
+            return;
+        }
+
+        // Collect all lines from buffer first to avoid borrow issues
+        let buffer = self.buffer();
+        let line_count = buffer.line_count();
+        let lines: Vec<String> = (0..line_count)
+            .filter_map(|i| buffer.line_str(i).map(|s| s.to_string()))
+            .collect();
+
+        // Now search through the collected lines
+        let mut matches = Vec::new();
+
+        if regex_mode {
+            // Regex search
+            let pattern = if case_insensitive {
+                format!("(?i){}", query)
+            } else {
+                query.clone()
+            };
+
+            if let Ok(re) = regex::Regex::new(&pattern) {
+                for (line_idx, line) in lines.iter().enumerate() {
+                    for mat in re.find_iter(line) {
+                        matches.push(SearchMatch {
+                            line: line_idx,
+                            start_col: mat.start(),
+                            end_col: mat.end(),
+                        });
+                    }
+                }
+            }
+        } else {
+            // Plain text search
+            let search_query = if case_insensitive {
+                query.to_lowercase()
+            } else {
+                query.clone()
+            };
+            let query_char_len = query.chars().count();
+
+            for (line_idx, line) in lines.iter().enumerate() {
+                let search_line = if case_insensitive {
+                    line.to_lowercase()
+                } else {
+                    line.clone()
+                };
+
+                // Search using character positions, not byte positions
+                let line_chars: Vec<char> = search_line.chars().collect();
+                let query_chars: Vec<char> = search_query.chars().collect();
+
+                for start_col in 0..line_chars.len() {
+                    if start_col + query_chars.len() > line_chars.len() {
+                        break;
+                    }
+                    let matches_here = line_chars[start_col..start_col + query_chars.len()]
+                        .iter()
+                        .zip(query_chars.iter())
+                        .all(|(a, b)| a == b);
+                    if matches_here {
+                        matches.push(SearchMatch {
+                            line: line_idx,
+                            start_col,
+                            end_col: start_col + query_char_len,
+                        });
+                    }
+                }
+            }
+        }
+
+        self.search_state.matches = matches;
+
+        // Find the match closest to current cursor position
+        if !self.search_state.matches.is_empty() {
+            let cursor = self.cursors().primary();
+            let cursor_pos = (cursor.line, cursor.col);
+
+            // Find first match at or after cursor
+            let mut best_idx = 0;
+            for (i, m) in self.search_state.matches.iter().enumerate() {
+                if (m.line, m.start_col) >= cursor_pos {
+                    best_idx = i;
+                    break;
+                }
+                best_idx = i;
+            }
+            self.search_state.current_match = best_idx;
+        }
+    }
+
+    /// Find and jump to next match
+    fn find_next(&mut self) {
+        self.update_search_matches();
+
+        if self.search_state.matches.is_empty() {
+            self.message = Some("No matches found".to_string());
+            return;
+        }
+
+        // Move to next match (wrap around)
+        self.search_state.current_match =
+            (self.search_state.current_match + 1) % self.search_state.matches.len();
+
+        self.jump_to_current_match();
+    }
+
+    /// Find and jump to previous match
+    fn find_prev(&mut self) {
+        self.update_search_matches();
+
+        if self.search_state.matches.is_empty() {
+            self.message = Some("No matches found".to_string());
+            return;
+        }
+
+        // Move to previous match (wrap around)
+        if self.search_state.current_match == 0 {
+            self.search_state.current_match = self.search_state.matches.len() - 1;
+        } else {
+            self.search_state.current_match -= 1;
+        }
+
+        self.jump_to_current_match();
+    }
+
+    /// Jump cursor to the current match and select it
+    fn jump_to_current_match(&mut self) {
+        if let Some(m) = self.search_state.matches.get(self.search_state.current_match).cloned() {
+            // Collapse to primary cursor and move it to the match
+            self.cursors_mut().collapse_to_primary();
+            let cursor = self.cursors_mut().primary_mut();
+
+            // Move cursor to start of match with selection extending to end
+            cursor.line = m.start_col.min(m.end_col); // Cursor at start
+            cursor.col = m.start_col;
+            cursor.line = m.line;
+
+            // Set up selection from end to start (so cursor is at start, anchor at end)
+            cursor.anchor_line = m.line;
+            cursor.anchor_col = m.end_col;
+            cursor.selecting = true;
+
+            // Scroll to make match visible
+            self.scroll_to_cursor();
+
+            // Update message with match count
+            let total = self.search_state.matches.len();
+            let current = self.search_state.current_match + 1;
+            self.message = Some(format!("{}/{} matches", current, total));
+        }
+    }
+
+    /// Replace current match and find next
+    fn replace_current(&mut self) {
+        let replace_text = match &self.prompt {
+            PromptState::FindReplace { replace_text, .. } => replace_text.clone(),
+            _ => return,
+        };
+
+        if self.search_state.matches.is_empty() {
+            self.message = Some("No matches to replace".to_string());
+            return;
+        }
+
+        // Get current match
+        let current_idx = self.search_state.current_match;
+        if let Some(m) = self.search_state.matches.get(current_idx).cloned() {
+            // Delete the matched text and insert replacement
+            let buffer = self.buffer_mut();
+            let start_char = buffer.line_col_to_char(m.line, m.start_col);
+            let end_char = buffer.line_col_to_char(m.line, m.end_col);
+            buffer.delete(start_char, end_char);
+            buffer.insert(start_char, &replace_text);
+
+            // Re-run search to update matches
+            self.search_state.last_query.clear(); // Force re-search
+            self.update_search_matches();
+
+            // Jump to next (or stay at same index if there are still matches)
+            if !self.search_state.matches.is_empty() {
+                // Keep index in bounds
+                if self.search_state.current_match >= self.search_state.matches.len() {
+                    self.search_state.current_match = 0;
+                }
+                self.jump_to_current_match();
+            } else {
+                self.message = Some("All matches replaced".to_string());
+            }
+        }
+    }
+
+    /// Replace all matches
+    fn replace_all(&mut self) {
+        let replace_text = match &self.prompt {
+            PromptState::FindReplace { replace_text, .. } => replace_text.clone(),
+            _ => return,
+        };
+
+        self.update_search_matches();
+
+        if self.search_state.matches.is_empty() {
+            self.message = Some("No matches to replace".to_string());
+            return;
+        }
+
+        let count = self.search_state.matches.len();
+
+        // Replace from end to start to preserve positions
+        let matches: Vec<_> = self.search_state.matches.iter().cloned().collect();
+        for m in matches.into_iter().rev() {
+            let buffer = self.buffer_mut();
+            let start_char = buffer.line_col_to_char(m.line, m.start_col);
+            let end_char = buffer.line_col_to_char(m.line, m.end_col);
+            buffer.delete(start_char, end_char);
+            buffer.insert(start_char, &replace_text);
+        }
+
+        self.search_state.matches.clear();
+        self.search_state.last_query.clear();
+        self.message = Some(format!("Replaced {} occurrences", count));
+    }
+
+    /// Toggle case sensitivity
+    fn toggle_case_sensitivity(&mut self) {
+        if let PromptState::FindReplace { find_query, replace_text, active_field, case_insensitive, regex_mode } = &self.prompt {
+            self.prompt = PromptState::FindReplace {
+                find_query: find_query.clone(),
+                replace_text: replace_text.clone(),
+                active_field: *active_field,
+                case_insensitive: !*case_insensitive,
+                regex_mode: *regex_mode,
+            };
+            self.search_state.last_query.clear(); // Force re-search
+            self.update_search_matches();
+        }
+    }
+
+    /// Toggle regex mode
+    fn toggle_regex_mode(&mut self) {
+        if let PromptState::FindReplace { find_query, replace_text, active_field, case_insensitive, regex_mode } = &self.prompt {
+            self.prompt = PromptState::FindReplace {
+                find_query: find_query.clone(),
+                replace_text: replace_text.clone(),
+                active_field: *active_field,
+                case_insensitive: *case_insensitive,
+                regex_mode: !*regex_mode,
+            };
+            self.search_state.last_query.clear(); // Force re-search
+            self.update_search_matches();
+        }
     }
 }
 

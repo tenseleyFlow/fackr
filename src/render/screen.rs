@@ -1964,6 +1964,143 @@ impl Screen {
         Ok(())
     }
 
+    /// Render the find/replace bar in the status area
+    pub fn render_find_replace_bar(
+        &mut self,
+        find_query: &str,
+        replace_text: &str,
+        active_field: bool, // true = find, false = replace
+        case_insensitive: bool,
+        regex_mode: bool,
+        match_count: usize,
+        current_match: usize,
+        left_offset: u16,
+    ) -> Result<()> {
+        let status_row = self.rows.saturating_sub(1);
+        let available_cols = (self.cols.saturating_sub(left_offset)) as usize;
+
+        execute!(self.stdout, MoveTo(left_offset, status_row))?;
+
+        // Colors
+        let bg = Color::DarkGrey;
+        let active_bg = Color::AnsiValue(238);
+        let inactive_bg = Color::AnsiValue(236);
+        let label_color = Color::AnsiValue(250);
+        let active_label = Color::White;
+        let toggle_on = Color::Yellow;
+        let toggle_off = Color::AnsiValue(243);
+
+        // Calculate widths
+        // Layout: Find: [____] Replace: [____] [.*] [Aa] | N/M matches
+        let find_label = "Find: ";
+        let replace_label = " Replace: ";
+        let suffix_len = 25; // toggles + match count
+        let input_width = (available_cols.saturating_sub(find_label.len() + replace_label.len() + suffix_len)) / 2;
+        let input_width = input_width.max(10).min(40);
+
+        // Start with background
+        execute!(self.stdout, SetBackgroundColor(bg))?;
+
+        // Find label and input
+        let find_bg = if active_field { active_bg } else { inactive_bg };
+        let find_label_color = if active_field { active_label } else { label_color };
+
+        execute!(
+            self.stdout,
+            SetForegroundColor(find_label_color),
+            Print(find_label),
+            SetBackgroundColor(find_bg),
+            SetForegroundColor(Color::White),
+        )?;
+
+        // Truncate or pad find query
+        let find_display: String = if find_query.len() > input_width {
+            find_query.chars().skip(find_query.len() - input_width).collect()
+        } else {
+            format!("{:<width$}", find_query, width = input_width)
+        };
+        execute!(self.stdout, Print(&find_display))?;
+
+        // Replace label and input
+        let replace_bg = if !active_field { active_bg } else { inactive_bg };
+        let replace_label_color = if !active_field { active_label } else { label_color };
+
+        execute!(
+            self.stdout,
+            SetBackgroundColor(bg),
+            SetForegroundColor(replace_label_color),
+            Print(replace_label),
+            SetBackgroundColor(replace_bg),
+            SetForegroundColor(Color::White),
+        )?;
+
+        // Truncate or pad replace text
+        let replace_display: String = if replace_text.len() > input_width {
+            replace_text.chars().skip(replace_text.len() - input_width).collect()
+        } else {
+            format!("{:<width$}", replace_text, width = input_width)
+        };
+        execute!(self.stdout, Print(&replace_display))?;
+
+        // Toggle buttons
+        execute!(self.stdout, SetBackgroundColor(bg))?;
+
+        // Regex toggle [.*]
+        let regex_color = if regex_mode { toggle_on } else { toggle_off };
+        execute!(
+            self.stdout,
+            Print(" "),
+            SetForegroundColor(regex_color),
+            Print("[.*]"),
+        )?;
+
+        // Case sensitivity toggle [Aa]
+        let case_color = if case_insensitive { toggle_on } else { toggle_off };
+        execute!(
+            self.stdout,
+            Print(" "),
+            SetForegroundColor(case_color),
+            Print("[Aa]"),
+        )?;
+
+        // Match count
+        execute!(self.stdout, SetForegroundColor(label_color))?;
+        if match_count > 0 {
+            execute!(
+                self.stdout,
+                Print(format!(" {}/{}", current_match + 1, match_count)),
+            )?;
+        } else if !find_query.is_empty() {
+            execute!(self.stdout, Print(" No matches"))?;
+        }
+
+        // Fill remaining space
+        let used = find_label.len() + input_width + replace_label.len() + input_width + 5 + 5 +
+            if match_count > 0 { format!(" {}/{}", current_match + 1, match_count).len() }
+            else if !find_query.is_empty() { 11 }
+            else { 0 };
+        let remaining = available_cols.saturating_sub(used);
+        execute!(
+            self.stdout,
+            Print(" ".repeat(remaining)),
+            ResetColor,
+        )?;
+
+        // Position cursor in active field
+        let cursor_col = if active_field {
+            left_offset as usize + find_label.len() + find_query.len().min(input_width)
+        } else {
+            left_offset as usize + find_label.len() + input_width + replace_label.len() + replace_text.len().min(input_width)
+        };
+        execute!(
+            self.stdout,
+            MoveTo(cursor_col as u16, status_row),
+            crossterm::cursor::Show,
+        )?;
+
+        Ok(())
+    }
+
     /// Render the LSP references panel (sidebar style)
     pub fn render_references_panel(
         &mut self,
