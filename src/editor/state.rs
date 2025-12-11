@@ -33,6 +33,103 @@ struct FortressEntry {
     is_dir: bool,
 }
 
+/// A command in the command palette
+#[derive(Debug, Clone, PartialEq)]
+struct PaletteCommand {
+    /// Display name (e.g., "Save File")
+    name: &'static str,
+    /// Keyboard shortcut (e.g., "Ctrl+S")
+    shortcut: &'static str,
+    /// Category for grouping (e.g., "File", "Edit")
+    category: &'static str,
+    /// Unique command identifier
+    id: &'static str,
+    /// Fuzzy match score (computed during filtering)
+    score: i32,
+}
+
+impl PaletteCommand {
+    const fn new(name: &'static str, shortcut: &'static str, category: &'static str, id: &'static str) -> Self {
+        Self { name, shortcut, category, id, score: 0 }
+    }
+}
+
+/// All available commands for the command palette
+const ALL_COMMANDS: &[PaletteCommand] = &[
+    // File operations
+    PaletteCommand::new("Save File", "Ctrl+S", "File", "save"),
+    PaletteCommand::new("Save All", "Ctrl+Shift+S", "File", "save-all"),
+    PaletteCommand::new("Open File Browser", "Ctrl+O", "File", "open"),
+    PaletteCommand::new("New Tab", "Ctrl+T", "File", "new-tab"),
+    PaletteCommand::new("Close Tab", "Ctrl+W", "File", "close-tab"),
+    PaletteCommand::new("Next Tab", "Ctrl+Tab", "File", "next-tab"),
+    PaletteCommand::new("Previous Tab", "Ctrl+Shift+Tab", "File", "prev-tab"),
+    PaletteCommand::new("Quit", "Ctrl+Q", "File", "quit"),
+
+    // Edit operations
+    PaletteCommand::new("Undo", "Ctrl+Z", "Edit", "undo"),
+    PaletteCommand::new("Redo", "Ctrl+Shift+Z", "Edit", "redo"),
+    PaletteCommand::new("Cut", "Ctrl+X", "Edit", "cut"),
+    PaletteCommand::new("Copy", "Ctrl+C", "Edit", "copy"),
+    PaletteCommand::new("Paste", "Ctrl+V", "Edit", "paste"),
+    PaletteCommand::new("Select All", "Ctrl+A", "Edit", "select-all"),
+    PaletteCommand::new("Select Line", "Ctrl+L", "Edit", "select-line"),
+    PaletteCommand::new("Select Word", "Ctrl+D", "Edit", "select-word"),
+    PaletteCommand::new("Toggle Line Comment", "Ctrl+/", "Edit", "toggle-comment"),
+    PaletteCommand::new("Join Lines", "Ctrl+J", "Edit", "join-lines"),
+    PaletteCommand::new("Duplicate Line", "Alt+Shift+Down", "Edit", "duplicate-line"),
+    PaletteCommand::new("Move Line Up", "Alt+Up", "Edit", "move-line-up"),
+    PaletteCommand::new("Move Line Down", "Alt+Down", "Edit", "move-line-down"),
+    PaletteCommand::new("Delete Line", "Ctrl+Shift+K", "Edit", "delete-line"),
+    PaletteCommand::new("Indent", "Tab", "Edit", "indent"),
+    PaletteCommand::new("Outdent", "Shift+Tab", "Edit", "outdent"),
+    PaletteCommand::new("Transpose Characters", "Ctrl+T", "Edit", "transpose"),
+
+    // Search operations
+    PaletteCommand::new("Find", "Ctrl+F", "Search", "find"),
+    PaletteCommand::new("Find and Replace", "Ctrl+R", "Search", "replace"),
+    PaletteCommand::new("Find Next", "F3", "Search", "find-next"),
+    PaletteCommand::new("Find Previous", "Shift+F3", "Search", "find-prev"),
+    PaletteCommand::new("Search in Files", "F4", "Search", "search-files"),
+
+    // Navigation
+    PaletteCommand::new("Go to Line", "Ctrl+G", "Navigation", "goto-line"),
+    PaletteCommand::new("Go to Beginning of File", "Ctrl+Home", "Navigation", "goto-start"),
+    PaletteCommand::new("Go to End of File", "Ctrl+End", "Navigation", "goto-end"),
+    PaletteCommand::new("Go to Matching Bracket", "Ctrl+M", "Navigation", "goto-bracket"),
+    PaletteCommand::new("Page Up", "PageUp", "Navigation", "page-up"),
+    PaletteCommand::new("Page Down", "PageDown", "Navigation", "page-down"),
+
+    // Selection
+    PaletteCommand::new("Expand Selection to Brackets", "Ctrl+Shift+M", "Selection", "select-brackets"),
+    PaletteCommand::new("Add Cursor Above", "Ctrl+Alt+Up", "Selection", "cursor-above"),
+    PaletteCommand::new("Add Cursor Below", "Ctrl+Alt+Down", "Selection", "cursor-below"),
+
+    // View / Panes
+    PaletteCommand::new("Split Pane Vertical", "Ctrl+\\", "View", "split-vertical"),
+    PaletteCommand::new("Split Pane Horizontal", "Ctrl+Shift+\\", "View", "split-horizontal"),
+    PaletteCommand::new("Close Pane", "Ctrl+Shift+W", "View", "close-pane"),
+    PaletteCommand::new("Focus Next Pane", "Ctrl+Alt+Right", "View", "next-pane"),
+    PaletteCommand::new("Focus Previous Pane", "Ctrl+Alt+Left", "View", "prev-pane"),
+    PaletteCommand::new("Toggle File Explorer", "Ctrl+B", "View", "toggle-explorer"),
+
+    // LSP / Code Intelligence
+    PaletteCommand::new("Go to Definition", "F12", "LSP", "goto-definition"),
+    PaletteCommand::new("Find References", "Shift+F12", "LSP", "find-references"),
+    PaletteCommand::new("Rename Symbol", "F2", "LSP", "rename"),
+    PaletteCommand::new("Show Hover Info", "Ctrl+K Ctrl+I", "LSP", "hover"),
+    PaletteCommand::new("Trigger Completion", "Ctrl+Space", "LSP", "completion"),
+    PaletteCommand::new("LSP Server Manager", "Alt+M", "LSP", "server-manager"),
+
+    // Bracket/Quote operations
+    PaletteCommand::new("Jump to Bracket", "Alt+]", "Brackets", "jump-bracket"),
+    PaletteCommand::new("Cycle Bracket Type", "Alt+[", "Brackets", "cycle-brackets"),
+    PaletteCommand::new("Remove Surrounding", "Alt+Backspace", "Brackets", "remove-surrounding"),
+
+    // Help
+    PaletteCommand::new("Command Palette", "Ctrl+P", "Help", "command-palette"),
+];
+
 /// Prompt state for quit confirmation
 #[derive(Debug, Clone, PartialEq)]
 enum PromptState {
@@ -97,6 +194,17 @@ enum PromptState {
         scroll_offset: usize,
         /// Whether search is in progress
         searching: bool,
+    },
+    /// Command palette (Ctrl+P)
+    CommandPalette {
+        /// Search/filter query (with > prefix)
+        query: String,
+        /// Filtered commands matching query
+        filtered: Vec<PaletteCommand>,
+        /// Currently selected index
+        selected_index: usize,
+        /// Scroll offset for long lists
+        scroll_offset: usize,
     },
 }
 
@@ -1459,6 +1567,27 @@ impl Editor {
                 return Ok(()); // Modal handles cursor
             }
 
+            // Render command palette if active
+            if let PromptState::CommandPalette {
+                ref query,
+                ref filtered,
+                selected_index,
+                scroll_offset,
+            } = self.prompt {
+                // Convert commands to tuple format for render function
+                let commands_tuples: Vec<(String, String, String, String)> = filtered
+                    .iter()
+                    .map(|c| (c.name.to_string(), c.shortcut.to_string(), c.category.to_string(), c.id.to_string()))
+                    .collect();
+                self.screen.render_command_palette(
+                    query,
+                    &commands_tuples,
+                    selected_index,
+                    scroll_offset,
+                )?;
+                return Ok(()); // Modal handles cursor
+            }
+
             // Render find/replace bar if active (replaces status bar)
             if let PromptState::FindReplace {
                 ref find_query,
@@ -1741,6 +1870,8 @@ impl Editor {
             (Key::F(5), _) => self.open_goto_line(),
             // Multi-file search: F4
             (Key::F(4), _) => self.open_file_search(),
+            // Command palette: Ctrl+P
+            (Key::Char('p'), Modifiers { ctrl: true, .. }) => self.open_command_palette(),
 
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
@@ -4416,6 +4547,78 @@ impl Editor {
                     _ => {}
                 }
             }
+            PromptState::CommandPalette {
+                ref mut query,
+                ref mut filtered,
+                ref mut selected_index,
+                ref mut scroll_offset,
+            } => {
+                match key {
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                    }
+                    Key::Enter => {
+                        // Execute selected command
+                        if let Some(cmd) = filtered.get(*selected_index) {
+                            let cmd_id = cmd.id.to_string();
+                            self.prompt = PromptState::None;
+                            self.execute_command(&cmd_id);
+                            self.scroll_to_cursor(); // Ensure viewport follows cursor after command
+                        } else {
+                            self.prompt = PromptState::None;
+                        }
+                    }
+                    Key::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            if *selected_index < *scroll_offset {
+                                *scroll_offset = *selected_index;
+                            }
+                        }
+                    }
+                    Key::Down => {
+                        if *selected_index + 1 < filtered.len() {
+                            *selected_index += 1;
+                            // Keep selected item visible (assume ~15 visible rows)
+                            let visible_rows = 15;
+                            if *selected_index >= *scroll_offset + visible_rows {
+                                *scroll_offset = selected_index.saturating_sub(visible_rows - 1);
+                            }
+                        }
+                    }
+                    Key::PageUp => {
+                        *selected_index = selected_index.saturating_sub(10);
+                        if *selected_index < *scroll_offset {
+                            *scroll_offset = *selected_index;
+                        }
+                    }
+                    Key::PageDown => {
+                        *selected_index = (*selected_index + 10).min(filtered.len().saturating_sub(1));
+                        let visible_rows = 15;
+                        if *selected_index >= *scroll_offset + visible_rows {
+                            *scroll_offset = selected_index.saturating_sub(visible_rows - 1);
+                        }
+                    }
+                    Key::Backspace => {
+                        if !query.is_empty() {
+                            query.pop();
+                            *filtered = filter_commands(query);
+                            *selected_index = 0;
+                            *scroll_offset = 0;
+                        }
+                    }
+                    Key::Char(c) => {
+                        // Only accept printable characters
+                        if !c.is_control() {
+                            query.push(c);
+                            *filtered = filter_commands(query);
+                            *selected_index = 0;
+                            *scroll_offset = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -5141,6 +5344,221 @@ impl Editor {
         let viewport_height = self.screen.rows.saturating_sub(2) as usize;
         pane.viewport_line = target_line.saturating_sub(viewport_height / 2);
     }
+
+    // === Command Palette ===
+
+    /// Open the command palette
+    fn open_command_palette(&mut self) {
+        let filtered = filter_commands("");
+        self.prompt = PromptState::CommandPalette {
+            query: String::new(),
+            filtered,
+            selected_index: 0,
+            scroll_offset: 0,
+        };
+    }
+
+    /// Execute a command by its ID
+    fn execute_command(&mut self, command_id: &str) {
+        match command_id {
+            // File operations
+            "save" => { let _ = self.save(); }
+            "save-all" => { let _ = self.workspace.save_all(); }
+            "open" => self.open_fortress(),
+            "new-tab" => self.workspace.new_tab(),
+            "close-tab" => self.close_pane(), // Close current pane/tab
+            "next-tab" => self.workspace.next_tab(),
+            "prev-tab" => self.workspace.prev_tab(),
+            "quit" => self.try_quit(),
+
+            // Edit operations
+            "undo" => self.undo(),
+            "redo" => self.redo(),
+            "cut" => self.cut(),
+            "copy" => self.copy(),
+            "paste" => self.paste(),
+            "select-all" => {
+                // Select all text in current buffer
+                let line_count = self.buffer().line_count();
+                let last_line = line_count.saturating_sub(1);
+                let last_col = self.buffer().line_len(last_line);
+                self.cursor_mut().anchor_line = 0;
+                self.cursor_mut().anchor_col = 0;
+                self.cursor_mut().line = last_line;
+                self.cursor_mut().col = last_col;
+                self.cursor_mut().selecting = true;
+            }
+            "select-line" => self.select_line(),
+            "select-word" => self.select_word(),
+            "toggle-comment" => self.toggle_line_comment(),
+            "join-lines" => self.join_lines(),
+            "duplicate-line" => self.duplicate_line_down(),
+            "move-line-up" => self.move_line_up(),
+            "move-line-down" => self.move_line_down(),
+            "delete-line" => {
+                // Delete the current line
+                let line = self.cursor().line;
+                let line_count = self.buffer().line_count();
+                let line_start = self.buffer().line_col_to_char(line, 0);
+                let line_end = if line + 1 < line_count {
+                    self.buffer().line_col_to_char(line + 1, 0)
+                } else {
+                    self.buffer().len_chars()
+                };
+                if line_start < line_end {
+                    self.buffer_mut().delete(line_start, line_end);
+                    self.cursor_mut().col = 0;
+                    self.cursor_mut().desired_col = 0;
+                    // Clamp line if we deleted the last line
+                    let new_line_count = self.buffer().line_count();
+                    if self.cursor().line >= new_line_count {
+                        self.cursor_mut().line = new_line_count.saturating_sub(1);
+                    }
+                }
+            }
+            "indent" => self.insert_tab(),
+            "outdent" => self.dedent(),
+            "transpose" => self.transpose_chars(),
+
+            // Search operations
+            "find" => self.open_find(),
+            "replace" => self.open_replace(),
+            "find-next" => self.find_next(),
+            "find-prev" => self.find_prev(),
+            "search-files" => self.open_file_search(),
+
+            // Navigation
+            "goto-line" => self.open_goto_line(),
+            "goto-start" => {
+                self.cursor_mut().line = 0;
+                self.cursor_mut().col = 0;
+                self.cursor_mut().desired_col = 0;
+                self.cursor_mut().clear_selection();
+            }
+            "goto-end" => {
+                let last_line = self.buffer().line_count().saturating_sub(1);
+                let last_col = self.buffer().line_len(last_line);
+                self.cursor_mut().line = last_line;
+                self.cursor_mut().col = last_col;
+                self.cursor_mut().desired_col = last_col;
+                self.cursor_mut().clear_selection();
+            }
+            "goto-bracket" => self.jump_to_matching_bracket(),
+            "page-up" => self.page_up(false),
+            "page-down" => self.page_down(false),
+
+            // Selection
+            "select-brackets" => self.jump_to_matching_bracket(), // TODO: implement select inside brackets
+            "cursor-above" => self.add_cursor_above(),
+            "cursor-below" => self.add_cursor_below(),
+
+            // View / Panes
+            "split-vertical" => self.split_vertical(),
+            "split-horizontal" => self.split_horizontal(),
+            "close-pane" => self.close_pane(),
+            "next-pane" => self.tab_mut().navigate_pane(PaneDirection::Right),
+            "prev-pane" => self.tab_mut().navigate_pane(PaneDirection::Left),
+            "toggle-explorer" => self.workspace.fuss.toggle(),
+
+            // LSP operations
+            "goto-definition" => self.lsp_goto_definition(),
+            "find-references" => self.lsp_find_references(),
+            "rename" => self.lsp_rename(),
+            "hover" => self.lsp_hover(),
+            "completion" => self.filter_completions(),
+            "server-manager" => self.toggle_server_manager(),
+
+            // Bracket/Quote operations
+            "jump-bracket" => self.jump_to_matching_bracket(),
+            "cycle-brackets" => self.cycle_brackets(),
+            "remove-surrounding" => self.remove_surrounding(),
+
+            // Help
+            "command-palette" => {} // Already open
+
+            _ => {
+                self.message = Some(format!("Unknown command: {}", command_id));
+            }
+        }
+    }
+}
+
+/// Fuzzy match scoring for command palette
+fn fuzzy_match_score(text: &str, pattern: &str) -> i32 {
+    if pattern.is_empty() {
+        return 100; // Empty pattern matches everything with base score
+    }
+
+    let text_lower = text.to_lowercase();
+    let pattern_lower = pattern.to_lowercase();
+
+    let mut score = 0i32;
+    let mut pattern_idx = 0;
+    let mut consecutive = 0;
+    let pattern_chars: Vec<char> = pattern_lower.chars().collect();
+    let text_chars: Vec<char> = text_lower.chars().collect();
+
+    if pattern_chars.is_empty() {
+        return 100;
+    }
+
+    for (i, &tc) in text_chars.iter().enumerate() {
+        if pattern_idx >= pattern_chars.len() {
+            break;
+        }
+
+        if tc == pattern_chars[pattern_idx] {
+            score += 10;
+            consecutive += 1;
+
+            // Bonus for consecutive matches
+            if consecutive > 1 {
+                score += 5;
+            }
+
+            // Bonus for matching at start or after space/separator
+            if i == 0 || matches!(text_chars.get(i.wrapping_sub(1)), Some(' ' | ':' | '-' | '_' | '/')) {
+                score += 15;
+            }
+
+            pattern_idx += 1;
+        } else {
+            consecutive = 0;
+        }
+    }
+
+    // Only return positive score if all pattern characters matched
+    if pattern_idx == pattern_chars.len() {
+        score
+    } else {
+        0
+    }
+}
+
+/// Filter and sort commands by fuzzy match score
+fn filter_commands(query: &str) -> Vec<PaletteCommand> {
+    let mut filtered: Vec<PaletteCommand> = ALL_COMMANDS
+        .iter()
+        .filter_map(|cmd| {
+            // Match against name, category, or command ID
+            let name_score = fuzzy_match_score(cmd.name, query);
+            let category_score = fuzzy_match_score(cmd.category, query) / 2; // Category match worth less
+            let id_score = fuzzy_match_score(cmd.id, query) / 2;
+
+            let score = name_score.max(category_score).max(id_score);
+            if score > 0 {
+                let mut cmd = cmd.clone();
+                cmd.score = score;
+                Some(cmd)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by score descending
+    filtered.sort_by(|a, b| b.score.cmp(&a.score));
+    filtered
 }
 
 impl Drop for Editor {
