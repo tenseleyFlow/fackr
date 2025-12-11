@@ -11,6 +11,8 @@ use std::path::Path;
 pub struct Buffer {
     text: Rope,
     pub modified: bool,
+    /// Cached content hash (invalidated on modification)
+    cached_hash: Option<u64>,
 }
 
 impl Default for Buffer {
@@ -24,6 +26,7 @@ impl Buffer {
         Self {
             text: Rope::new(),
             modified: false,
+            cached_hash: None,
         }
     }
 
@@ -32,6 +35,7 @@ impl Buffer {
         Self {
             text: Rope::from_str(s),
             modified: false,
+            cached_hash: None,
         }
     }
 
@@ -42,6 +46,7 @@ impl Buffer {
         Ok(Self {
             text,
             modified: false,
+            cached_hash: None,
         })
     }
 
@@ -58,6 +63,7 @@ impl Buffer {
         let idx = char_idx.min(self.text.len_chars());
         self.text.insert(idx, text);
         self.modified = true;
+        self.cached_hash = None; // Invalidate hash cache
     }
 
     /// Delete characters in range [start, end)
@@ -67,6 +73,7 @@ impl Buffer {
         if start < end {
             self.text.remove(start..end);
             self.modified = true;
+            self.cached_hash = None; // Invalidate hash cache
         }
     }
 
@@ -167,21 +174,29 @@ impl Buffer {
         self.text.to_string()
     }
 
-    /// Compute a hash of the buffer contents for change detection
-    pub fn content_hash(&self) -> u64 {
+    /// Compute a hash of the buffer contents for change detection.
+    /// Uses cached value if available, otherwise computes and caches.
+    pub fn content_hash(&mut self) -> u64 {
+        if let Some(hash) = self.cached_hash {
+            return hash;
+        }
+
         let mut hasher = DefaultHasher::new();
         // Hash character by character to ensure consistent hashing
         // regardless of rope's internal chunk structure
         for ch in self.text.chars() {
             ch.hash(&mut hasher);
         }
-        hasher.finish()
+        let hash = hasher.finish();
+        self.cached_hash = Some(hash);
+        hash
     }
 
     /// Replace entire buffer content (used for backup restoration)
     pub fn set_contents(&mut self, content: &str) {
         self.text = Rope::from_str(content);
         self.modified = true;
+        self.cached_hash = None; // Invalidate hash cache
     }
 
     /// Find matching bracket for the character at the given position
@@ -342,5 +357,35 @@ mod tests {
         let mut buf = Buffer::from_str("Hello World");
         buf.delete(5, 11);
         assert_eq!(buf.line_str(0), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_content_hash_caching() {
+        let mut buf = Buffer::from_str("Hello World");
+
+        // First call computes the hash
+        let hash1 = buf.content_hash();
+        assert!(buf.cached_hash.is_some());
+
+        // Second call returns cached value (same hash)
+        let hash2 = buf.content_hash();
+        assert_eq!(hash1, hash2);
+
+        // After modification, cache should be invalidated
+        buf.insert(5, "!");
+        assert!(buf.cached_hash.is_none());
+
+        // New hash should be different
+        let hash3 = buf.content_hash();
+        assert_ne!(hash1, hash3);
+        assert!(buf.cached_hash.is_some());
+
+        // Delete also invalidates cache
+        buf.delete(5, 6);
+        assert!(buf.cached_hash.is_none());
+
+        // After delete, should be back to original content and hash
+        let hash4 = buf.content_hash();
+        assert_eq!(hash1, hash4);
     }
 }

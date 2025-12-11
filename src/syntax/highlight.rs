@@ -57,7 +57,7 @@ pub struct Token {
 }
 
 /// State for multiline constructs (comments, strings)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct HighlightState {
     /// Currently in a multiline comment
     pub in_block_comment: bool,
@@ -72,6 +72,11 @@ pub struct Highlighter {
     language: Option<LanguageDef>,
     /// State for multiline constructs
     state: HighlightState,
+    /// Cached state at the END of each line (state_cache[i] = state after processing line i)
+    /// This allows O(1) lookup of the starting state for any line
+    state_cache: Vec<HighlightState>,
+    /// Line index from which cache is invalid (everything from this line onward needs recalc)
+    cache_valid_until: usize,
 }
 
 impl Default for Highlighter {
@@ -86,25 +91,27 @@ impl Highlighter {
         Self {
             language: None,
             state: HighlightState::default(),
+            state_cache: Vec::new(),
+            cache_valid_until: 0,
         }
     }
 
     /// Detect and set language based on filename
     pub fn detect_language(&mut self, filename: &str) {
         self.language = Language::detect(filename).map(|l| l.definition());
-        self.state = HighlightState::default();
+        self.invalidate_cache(0);
     }
 
     /// Set language explicitly
     pub fn set_language(&mut self, lang: Language) {
         self.language = Some(lang.definition());
-        self.state = HighlightState::default();
+        self.invalidate_cache(0);
     }
 
     /// Clear language (disable highlighting)
     pub fn clear_language(&mut self) {
         self.language = None;
-        self.state = HighlightState::default();
+        self.invalidate_cache(0);
     }
 
     /// Check if highlighting is enabled
@@ -117,9 +124,53 @@ impl Highlighter {
         self.language.as_ref().map(|l| l.name)
     }
 
+    /// Get the line comment prefix for the current language (e.g., "//", "#", "--")
+    pub fn line_comment(&self) -> Option<&'static str> {
+        self.language.as_ref().and_then(|l| l.line_comment)
+    }
+
     /// Reset multiline state (call when buffer changes significantly)
     pub fn reset_state(&mut self) {
+        self.invalidate_cache(0);
+    }
+
+    /// Invalidate the highlight state cache from a specific line onward.
+    /// Call this when the buffer content changes at or after line `from_line`.
+    pub fn invalidate_cache(&mut self, from_line: usize) {
+        self.cache_valid_until = self.cache_valid_until.min(from_line);
         self.state = HighlightState::default();
+    }
+
+    /// Get the starting highlight state for a given line by looking up the cache.
+    /// Returns the state after processing (line_idx - 1), or default state for line 0.
+    pub fn get_state_for_line(&self, line_idx: usize) -> HighlightState {
+        if line_idx == 0 {
+            HighlightState::default()
+        } else if line_idx <= self.cache_valid_until && line_idx <= self.state_cache.len() {
+            self.state_cache[line_idx - 1].clone()
+        } else {
+            // Cache miss - caller needs to rebuild from last valid point
+            HighlightState::default()
+        }
+    }
+
+    /// Update the state cache after tokenizing a line.
+    /// Call this after tokenize_line() with the resulting state.
+    pub fn update_cache(&mut self, line_idx: usize, state: &HighlightState) {
+        // Ensure cache is large enough
+        if line_idx >= self.state_cache.len() {
+            self.state_cache.resize(line_idx + 1, HighlightState::default());
+        }
+        self.state_cache[line_idx] = state.clone();
+        // Update valid range if this extends it
+        if line_idx >= self.cache_valid_until {
+            self.cache_valid_until = line_idx + 1;
+        }
+    }
+
+    /// Get the line number from which the cache is valid
+    pub fn cache_valid_from(&self) -> usize {
+        self.cache_valid_until
     }
 
     /// Tokenize a single line, returning tokens and updated state
@@ -158,7 +209,7 @@ impl Highlighter {
             }
 
             // Handle continuing multiline string
-            if let Some(ref delim) = state.in_multiline_string.clone() {
+            if let Some(delim) = state.in_multiline_string.as_ref() {
                 if let Some(end_pos) = self.find_string_end(&chars, i, delim) {
                     tokens.push(Token {
                         token_type: TokenType::String,

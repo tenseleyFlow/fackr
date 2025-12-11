@@ -57,7 +57,7 @@ pub struct BufferEntry {
 
 impl BufferEntry {
     pub fn new() -> Self {
-        let buffer = Buffer::new();
+        let mut buffer = Buffer::new();
         let saved_hash = Some(buffer.content_hash()); // Empty buffer is "saved"
         let saved_len = Some(buffer.len_chars());
         Self {
@@ -74,7 +74,7 @@ impl BufferEntry {
     /// Create a buffer from string content (for diff views, etc.)
     /// The buffer is considered "saved" so it won't prompt for save on close
     pub fn from_content(content: &str, display_name: Option<&str>) -> Self {
-        let buffer = Buffer::from_str(content);
+        let mut buffer = Buffer::from_str(content);
         let saved_hash = Some(buffer.content_hash());
         let saved_len = Some(buffer.len_chars());
 
@@ -96,7 +96,7 @@ impl BufferEntry {
     }
 
     pub fn from_file(path: &Path, workspace_root: &Path) -> Result<Self> {
-        let buffer = Buffer::load(path)?;
+        let mut buffer = Buffer::load(path)?;
         let saved_hash = Some(buffer.content_hash()); // Hash at load time
         let saved_len = Some(buffer.len_chars());
         let is_orphan = !path.starts_with(workspace_root);
@@ -139,14 +139,14 @@ impl BufferEntry {
     }
 
     /// Check if buffer has been modified since last save
-    pub fn is_modified(&self) -> bool {
+    pub fn is_modified(&mut self) -> bool {
         match (self.saved_hash, self.saved_len) {
             (Some(hash), Some(len)) => {
                 // Quick check: if length differs, definitely modified
                 if self.buffer.len_chars() != len {
                     return true;
                 }
-                // Length matches - need to check content hash
+                // Length matches - need to check content hash (uses cache)
                 self.buffer.content_hash() != hash
             },
             _ => true, // No saved state means never saved
@@ -255,8 +255,8 @@ impl Tab {
     }
 
     /// Check if any buffer has been modified
-    pub fn is_modified(&self) -> bool {
-        self.buffers.iter().any(|b| b.is_modified())
+    pub fn is_modified(&mut self) -> bool {
+        self.buffers.iter_mut().any(|b| b.is_modified())
     }
 
     /// Get the active pane
@@ -882,9 +882,9 @@ impl Workspace {
     }
 
     /// Check if any buffer in the workspace has unsaved changes
-    pub fn has_unsaved_changes(&self) -> bool {
-        for tab in &self.tabs {
-            for buffer_entry in &tab.buffers {
+    pub fn has_unsaved_changes(&mut self) -> bool {
+        for tab in &mut self.tabs {
+            for buffer_entry in &mut tab.buffers {
                 if buffer_entry.is_modified() {
                     return true;
                 }
@@ -894,10 +894,10 @@ impl Workspace {
     }
 
     /// Get list of modified buffer paths
-    pub fn modified_buffers(&self) -> Vec<PathBuf> {
+    pub fn modified_buffers(&mut self) -> Vec<PathBuf> {
         let mut modified = Vec::new();
-        for tab in &self.tabs {
-            for buffer_entry in &tab.buffers {
+        for tab in &mut self.tabs {
+            for buffer_entry in &mut tab.buffers {
                 if buffer_entry.is_modified() {
                     if let Some(path) = &buffer_entry.path {
                         // Convert relative path to absolute
@@ -919,8 +919,8 @@ impl Workspace {
         // Collect paths to save first to avoid borrow issues
         let mut to_save: Vec<(usize, usize, PathBuf)> = Vec::new();
 
-        for (tab_idx, tab) in self.tabs.iter().enumerate() {
-            for (buf_idx, buffer_entry) in tab.buffers.iter().enumerate() {
+        for (tab_idx, tab) in self.tabs.iter_mut().enumerate() {
+            for (buf_idx, buffer_entry) in tab.buffers.iter_mut().enumerate() {
                 if buffer_entry.is_modified() {
                     if let Some(path) = &buffer_entry.path {
                         let full_path = if buffer_entry.is_orphan {
@@ -946,9 +946,12 @@ impl Workspace {
     }
 
     /// Write backups for all modified buffers
-    pub fn backup_all_modified(&self) -> Result<()> {
-        for tab in &self.tabs {
-            for buffer_entry in &tab.buffers {
+    pub fn backup_all_modified(&mut self) -> Result<()> {
+        // Collect backup info first to avoid borrow issues
+        let mut to_backup: Vec<(PathBuf, String)> = Vec::new();
+
+        for tab in &mut self.tabs {
+            for buffer_entry in &mut tab.buffers {
                 if buffer_entry.is_modified() {
                     if let Some(path) = &buffer_entry.path {
                         let full_path = if buffer_entry.is_orphan {
@@ -957,10 +960,14 @@ impl Workspace {
                             self.root.join(path)
                         };
                         let content = buffer_entry.buffer.contents();
-                        self.write_backup(&full_path, &content)?;
+                        to_backup.push((full_path, content));
                     }
                 }
             }
+        }
+
+        for (full_path, content) in to_backup {
+            self.write_backup(&full_path, &content)?;
         }
         Ok(())
     }

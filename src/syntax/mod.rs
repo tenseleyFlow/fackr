@@ -3,4 +3,4 @@
 mod highlight;
 mod languages;
 
-pub use highlight::{Highlighter, HighlightState, Token};
+pub use highlight::{Highlighter, Token};

@@ -16,7 +16,7 @@ use crate::buffer::Buffer;
 use crate::editor::{Cursors, Position};
 use crate::fuss::VisibleItem;
 use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, Location, ServerManagerPanel};
-use crate::syntax::{Highlighter, HighlightState, Token};
+use crate::syntax::{Highlighter, Token};
 
 // Editor color scheme (256-color palette)
 const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
@@ -667,32 +667,58 @@ impl Screen {
         secondary_cursors: &[usize],
         tokens: &[Token],
     ) -> Result<()> {
-        let chars: Vec<char> = line.chars().take(max_cols).collect();
         let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
         let default_fg = Color::Reset; // Default terminal foreground
 
-        // Build selection ranges for this line from all selections
-        let mut sel_ranges: Vec<(usize, usize)> = Vec::new();
+        // Pre-compute selection ranges for this line (small fixed array to avoid allocation)
+        // Most users have at most a few cursors with selections
+        let mut sel_start: [usize; 8] = [0; 8];
+        let mut sel_end: [usize; 8] = [0; 8];
+        let mut sel_count = 0;
         for (start, end) in selections {
-            if line_idx >= start.line && line_idx <= end.line {
-                let s = if line_idx == start.line { start.col } else { 0 };
-                let e = if line_idx == end.line { end.col } else { chars.len() };
-                if s < e {
-                    sel_ranges.push((s, e));
+            if line_idx >= start.line && line_idx <= end.line && sel_count < 8 {
+                sel_start[sel_count] = if line_idx == start.line { start.col } else { 0 };
+                sel_end[sel_count] = if line_idx == end.line { end.col } else { usize::MAX };
+                if sel_start[sel_count] < sel_end[sel_count] {
+                    sel_count += 1;
                 }
             }
         }
 
-        // Helper to find token at character position
-        let get_token_at = |col: usize| -> Option<&Token> {
-            tokens.iter().find(|t| col >= t.start && col < t.end)
-        };
+        // Track current token index for efficient lookup (tokens are sorted by position)
+        let mut current_token_idx = 0;
+
+        // Count characters rendered for end-of-line cursor handling
+        let mut char_count = 0;
 
         // Render character by character for precise highlighting
-        for (col, ch) in chars.iter().enumerate() {
-            let in_selection = sel_ranges.iter().any(|(s, e)| col >= *s && col < *e);
+        for (col, ch) in line.chars().enumerate() {
+            if col >= max_cols {
+                break;
+            }
+            char_count = col + 1;
+
+            // Check selection (inline check against fixed array)
+            let in_selection = (0..sel_count).any(|i| col >= sel_start[i] && col < sel_end[i]);
             let is_bracket_match = bracket_col == Some(col);
             let is_secondary_cursor = secondary_cursors.contains(&col);
+
+            // Advance token index if needed (tokens are sorted by start position)
+            while current_token_idx < tokens.len() && tokens[current_token_idx].end <= col {
+                current_token_idx += 1;
+            }
+
+            // Get current token if any
+            let current_token = if current_token_idx < tokens.len() {
+                let t = &tokens[current_token_idx];
+                if col >= t.start && col < t.end {
+                    Some(t)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             // Determine background color (priority: selection > cursor > bracket > syntax/line)
             let bg = if in_selection {
@@ -710,7 +736,7 @@ impl Screen {
                 (Color::White, false)
             } else if is_secondary_cursor {
                 (Color::White, false)
-            } else if let Some(token) = get_token_at(col) {
+            } else if let Some(token) = current_token {
                 (token.token_type.color(), token.token_type.bold())
             } else {
                 (default_fg, false)
@@ -741,13 +767,13 @@ impl Screen {
 
         // Handle secondary cursors at end of line (past text content)
         let max_cursor_past_text = secondary_cursors.iter()
-            .filter(|&&c| c >= chars.len())
+            .filter(|&&c| c >= char_count)
             .max()
             .copied();
 
         if let Some(max_cursor) = max_cursor_past_text {
             if max_cursor < max_cols {
-                for col in chars.len()..=max_cursor {
+                for col in char_count..=max_cursor {
                     if secondary_cursors.contains(&col) {
                         execute!(
                             self.stdout,
@@ -1208,7 +1234,7 @@ impl Screen {
         left_offset: u16,
         top_offset: u16,
         is_modified: bool,
-        highlighter: &Highlighter,
+        highlighter: &mut Highlighter,
     ) -> Result<()> {
         execute!(self.stdout, Hide)?;
 
@@ -1241,14 +1267,17 @@ impl Screen {
         // Reserve 2 rows: 1 for gap above status bar, 1 for status bar itself
         let text_rows = self.rows.saturating_sub(2 + top_offset) as usize;
 
-        // Track multiline state across lines
-        let mut highlight_state = HighlightState::default();
+        // Get the starting highlight state for the viewport using the cache.
+        // Only tokenize lines from the last cached point if needed.
+        let cache_valid = highlighter.cache_valid_from();
+        let start_line = cache_valid.min(viewport_line);
+        let mut highlight_state = highlighter.get_state_for_line(start_line);
 
-        // Pre-tokenize lines from start of buffer to viewport for correct multiline state
-        // (In a production system, we'd cache this state per line)
-        for line_idx in 0..viewport_line {
+        // Build cache from last valid point up to viewport (only if needed)
+        for line_idx in start_line..viewport_line {
             if let Some(line) = buffer.line_str(line_idx) {
                 let _ = highlighter.tokenize_line(&line, &mut highlight_state);
+                highlighter.update_cache(line_idx, &highlight_state);
             }
         }
 
@@ -1274,8 +1303,9 @@ impl Screen {
                 )?;
 
                 if let Some(line) = buffer.line_str(line_idx) {
-                    // Tokenize this line
+                    // Tokenize this line and update cache
                     let tokens = highlighter.tokenize_line(&line, &mut highlight_state);
+                    highlighter.update_cache(line_idx, &highlight_state);
 
                     // Apply horizontal scroll to bracket match column
                     // Only show if the bracket is in the visible area
@@ -2272,6 +2302,214 @@ impl Screen {
         )?;
 
         // Hide cursor when in fortress modal
+        execute!(self.stdout, Hide)?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    /// Render the multi-file search modal (F4)
+    pub fn render_file_search_modal(
+        &mut self,
+        query: &str,
+        results: &[(std::path::PathBuf, usize, String)], // (path, line_num, line_content)
+        selected_index: usize,
+        scroll_offset: usize,
+        searching: bool,
+    ) -> Result<()> {
+        let (width, height) = (self.cols as usize, self.rows as usize);
+
+        // Modal dimensions - centered, wider than fortress
+        let modal_width = 80.min(width - 4);
+        let modal_height = 25.min(height - 4);
+        let start_col = (width.saturating_sub(modal_width)) / 2;
+        let start_row = (height.saturating_sub(modal_height)) / 2;
+
+        // Colors
+        let bg = Color::AnsiValue(235);
+        let border_color = Color::AnsiValue(244);
+        let header_color = Color::Cyan;
+        let path_color = Color::Blue;
+        let line_num_color = Color::Yellow;
+        let content_color = Color::AnsiValue(252);
+        let selected_bg = Color::AnsiValue(240);
+        let input_bg = Color::AnsiValue(238);
+
+        // Draw top border with title
+        let title = " Search in Files (F4) ";
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("┌"),
+            SetForegroundColor(header_color),
+            Print(title),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}┐", "", width = modal_width.saturating_sub(title.len() + 2))),
+            ResetColor,
+        )?;
+
+        // Draw search input row
+        let status = if searching {
+            "Searching..."
+        } else if results.is_empty() && !query.is_empty() {
+            "No results"
+        } else if !results.is_empty() {
+            ""
+        } else {
+            "Type query, press Enter"
+        };
+        let input_width = modal_width.saturating_sub(14 + status.len());
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 1) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetForegroundColor(Color::AnsiValue(248)),
+            Print("Search: "),
+            SetBackgroundColor(input_bg),
+            SetForegroundColor(Color::White),
+            Print(format!("{:<width$}", query, width = input_width)),
+            SetBackgroundColor(bg),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!(" {}", status)),
+            SetForegroundColor(border_color),
+            Print(" │"),
+            ResetColor,
+        )?;
+
+        // Draw separator with result count
+        let count_str = if results.is_empty() {
+            String::new()
+        } else {
+            format!(" {} results ", results.len())
+        };
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 2) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("├"),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(&count_str),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}┤", "", width = modal_width.saturating_sub(2 + count_str.len()))),
+            ResetColor,
+        )?;
+
+        // Calculate visible range
+        let visible_rows = modal_height.saturating_sub(5); // Account for borders, title, input, help
+
+        // Adjust scroll offset so selected item is visible
+        let scroll = if selected_index < scroll_offset {
+            selected_index
+        } else if selected_index >= scroll_offset + visible_rows {
+            selected_index - visible_rows + 1
+        } else {
+            scroll_offset
+        };
+
+        // Draw results
+        for (display_idx, (path, line_num, content)) in results.iter().enumerate().skip(scroll).take(visible_rows) {
+            let row = (start_row + 3 + display_idx - scroll) as u16;
+            let is_selected = display_idx == selected_index;
+
+            let item_bg = if is_selected { selected_bg } else { bg };
+
+            // Format: path:line: content
+            let path_str = path.to_string_lossy();
+            let line_str = format!("{}", line_num);
+
+            // Calculate available width for content
+            let prefix_len = path_str.len().min(30) + 1 + line_str.len() + 2; // path:line:
+            let content_width = modal_width.saturating_sub(prefix_len + 4);
+
+            // Truncate path if needed
+            let display_path = if path_str.len() > 30 {
+                format!("...{}", &path_str[path_str.len().saturating_sub(27)..])
+            } else {
+                path_str.to_string()
+            };
+
+            // Truncate content if needed
+            let display_content = if content.len() > content_width {
+                format!("{}...", &content[..content_width.saturating_sub(3)])
+            } else {
+                content.clone()
+            };
+
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(item_bg),
+                SetForegroundColor(border_color),
+                Print("│ "),
+                SetForegroundColor(path_color),
+                Print(&display_path),
+                SetForegroundColor(Color::AnsiValue(243)),
+                Print(":"),
+                SetForegroundColor(line_num_color),
+                Print(&line_str),
+                SetForegroundColor(Color::AnsiValue(243)),
+                Print(": "),
+                SetForegroundColor(content_color),
+            )?;
+
+            // Calculate remaining width and print content with padding
+            let used = display_path.len() + 1 + line_str.len() + 2 + 2;
+            let remaining = modal_width.saturating_sub(used + 2);
+            execute!(
+                self.stdout,
+                Print(format!("{:<width$}", display_content, width = remaining)),
+                SetForegroundColor(border_color),
+                Print("│"),
+                ResetColor,
+            )?;
+        }
+
+        // Fill remaining rows with empty space
+        let items_drawn = results.len().saturating_sub(scroll).min(visible_rows);
+        for i in items_drawn..visible_rows {
+            let row = (start_row + 3 + i) as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(bg),
+                SetForegroundColor(border_color),
+                Print(format!("│{:width$}│", "", width = modal_width.saturating_sub(2))),
+                ResetColor,
+            )?;
+        }
+
+        // Draw help text row
+        let help_row = (start_row + 3 + visible_rows) as u16;
+        let help_text = "Enter:search/open  ↑↓:nav  PgUp/Dn:scroll  Esc:close";
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("├"),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!(" {:<width$}", help_text, width = modal_width.saturating_sub(3))),
+            SetForegroundColor(border_color),
+            Print("┤"),
+            ResetColor,
+        )?;
+
+        // Draw bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, help_row + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("└{:─<width$}┘", "", width = modal_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Hide cursor when in modal
         execute!(self.stdout, Hide)?;
 
         self.stdout.flush()?;

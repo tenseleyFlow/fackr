@@ -85,6 +85,30 @@ enum PromptState {
         /// Scroll offset for long lists
         scroll_offset: usize,
     },
+    /// Multi-file search modal (F4)
+    FileSearch {
+        /// Search query
+        query: String,
+        /// Search results: (file_path, line_number, line_content)
+        results: Vec<FileSearchResult>,
+        /// Currently selected index
+        selected_index: usize,
+        /// Scroll offset for long lists
+        scroll_offset: usize,
+        /// Whether search is in progress
+        searching: bool,
+    },
+}
+
+/// A single result from multi-file search
+#[derive(Debug, Clone, PartialEq)]
+struct FileSearchResult {
+    /// Relative path to file
+    path: PathBuf,
+    /// Line number (1-indexed for display)
+    line_num: usize,
+    /// The matching line content (trimmed)
+    line_content: String,
 }
 
 /// Action to perform when text input is complete
@@ -105,12 +129,18 @@ struct LspState {
     hover: Option<HoverInfo>,
     /// Whether hover popup is visible
     hover_visible: bool,
-    /// Current completion list
+    /// Original unfiltered completion list from LSP
+    completions_original: Vec<CompletionItem>,
+    /// Current filtered completion list
     completions: Vec<CompletionItem>,
     /// Selected completion index
     completion_index: usize,
     /// Whether completion popup is visible
     completion_visible: bool,
+    /// Filter text typed while completion is open
+    completion_filter: String,
+    /// Cursor column when completion was opened (to track popup position)
+    completion_start_col: usize,
     /// Current diagnostics for the active file
     diagnostics: Vec<Diagnostic>,
     /// Go-to-definition results (for multi-result navigation)
@@ -148,6 +178,17 @@ struct SearchState {
     last_regex: bool,
 }
 
+/// Cached bracket match result
+#[derive(Debug, Default)]
+struct BracketMatchCache {
+    /// Cursor position when cache was computed (line, col)
+    cursor_pos: Option<(usize, usize)>,
+    /// The cached match result
+    result: Option<(usize, usize)>,
+    /// Whether the cache is valid (invalidated on buffer changes)
+    valid: bool,
+}
+
 /// Main editor state
 pub struct Editor {
     /// The workspace (owns tabs, panes, fuss mode, and config)
@@ -174,6 +215,8 @@ pub struct Editor {
     server_manager: ServerManagerPanel,
     /// Search state for find/replace
     search_state: SearchState,
+    /// Cached bracket match for rendering
+    bracket_cache: BracketMatchCache,
 }
 
 impl Editor {
@@ -218,6 +261,7 @@ impl Editor {
             lsp_state: LspState::default(),
             server_manager: ServerManagerPanel::new(),
             search_state: SearchState::default(),
+            bracket_cache: BracketMatchCache::default(),
         };
 
         // If there are backups, show restore prompt
@@ -281,6 +325,48 @@ impl Editor {
         &mut tab.buffers[buffer_idx].buffer
     }
 
+    /// Invalidate syntax highlight cache from a given line onward.
+    /// Call this when buffer content changes at or after the specified line.
+    #[inline]
+    fn invalidate_highlight_cache(&mut self, from_line: usize) {
+        let tab = self.workspace.active_tab_mut();
+        let pane_idx = tab.active_pane;
+        let buffer_idx = tab.panes[pane_idx].buffer_idx;
+        tab.buffers[buffer_idx].highlighter.invalidate_cache(from_line);
+    }
+
+    /// Invalidate the bracket match cache (call on buffer changes)
+    #[inline]
+    fn invalidate_bracket_cache(&mut self) {
+        self.bracket_cache.valid = false;
+    }
+
+    /// Get cached bracket match for current cursor position.
+    /// Computes and caches the result if needed.
+    fn get_bracket_match(&mut self) -> Option<(usize, usize)> {
+        let cursor = self.cursor();
+        let cursor_pos = (cursor.line, cursor.col);
+
+        // Check if cache is valid and for the same position
+        if self.bracket_cache.valid {
+            if let Some(cached_pos) = self.bracket_cache.cursor_pos {
+                if cached_pos == cursor_pos {
+                    return self.bracket_cache.result;
+                }
+            }
+        }
+
+        // Cache miss - compute the bracket match
+        let result = self.buffer().find_matching_bracket(cursor_pos.0, cursor_pos.1);
+
+        // Update cache
+        self.bracket_cache.cursor_pos = Some(cursor_pos);
+        self.bracket_cache.result = result;
+        self.bracket_cache.valid = true;
+
+        result
+    }
+
     /// Get current cursors (read-only)
     #[inline]
     fn cursors(&self) -> &Cursors {
@@ -303,6 +389,15 @@ impl Editor {
         let pane_idx = tab.active_pane;
         let buffer_idx = tab.panes[pane_idx].buffer_idx;
         &mut tab.buffers[buffer_idx].history
+    }
+
+    /// Get current buffer entry (immutable)
+    #[inline]
+    fn buffer_entry(&self) -> &crate::workspace::BufferEntry {
+        let tab = self.workspace.active_tab();
+        let pane_idx = tab.active_pane;
+        let buffer_idx = tab.panes[pane_idx].buffer_idx;
+        &tab.buffers[buffer_idx]
     }
 
     /// Get current buffer entry (mutable)
@@ -438,9 +533,12 @@ impl Editor {
             match response {
                 LspResponse::Completions(id, items) => {
                     if self.lsp_state.pending_completion == Some(id) {
+                        self.lsp_state.completions_original = items.clone();
                         self.lsp_state.completions = items;
                         self.lsp_state.completion_index = 0;
                         self.lsp_state.completion_visible = !self.lsp_state.completions.is_empty();
+                        self.lsp_state.completion_filter.clear();
+                        self.lsp_state.completion_start_col = self.cursor().col;
                         self.lsp_state.pending_completion = None;
                     }
                 }
@@ -571,7 +669,7 @@ impl Editor {
     /// Sync document changes to LSP server
     fn sync_document_to_lsp(&mut self) {
         let current_path = self.filename();
-        let current_hash = self.buffer().content_hash();
+        let current_hash = self.buffer_mut().content_hash();
 
         // Check if we switched files
         let file_changed = current_path != self.lsp_state.last_synced_path;
@@ -941,8 +1039,31 @@ impl Editor {
         }
 
         // Clear completion state
+        self.dismiss_completion();
+    }
+
+    /// Dismiss the completion popup
+    fn dismiss_completion(&mut self) {
         self.lsp_state.completion_visible = false;
         self.lsp_state.completions.clear();
+        self.lsp_state.completions_original.clear();
+        self.lsp_state.completion_index = 0;
+        self.lsp_state.completion_filter.clear();
+    }
+
+    /// Filter completions based on typed text
+    fn filter_completions(&mut self) {
+        let filter = self.lsp_state.completion_filter.to_lowercase();
+        if filter.is_empty() {
+            self.lsp_state.completions = self.lsp_state.completions_original.clone();
+        } else {
+            self.lsp_state.completions = self.lsp_state.completions_original
+                .iter()
+                .filter(|item| item.label.to_lowercase().contains(&filter))
+                .cloned()
+                .collect();
+        }
+        // Reset selection to first item
         self.lsp_state.completion_index = 0;
     }
 
@@ -1126,7 +1247,7 @@ impl Editor {
         }
 
         // Build tab info for tab bar
-        let tabs: Vec<TabInfo> = self.workspace.tabs.iter().enumerate().map(|(i, tab)| {
+        let tabs: Vec<TabInfo> = self.workspace.tabs.iter_mut().enumerate().map(|(i, tab)| {
             TabInfo {
                 name: tab.display_name(),
                 is_active: i == self.workspace.active_tab,
@@ -1138,12 +1259,27 @@ impl Editor {
         // Render tab bar (returns height: 1 if multiple tabs, 0 if single tab)
         let top_offset = self.screen.render_tab_bar(&tabs, fuss_width)?;
 
-        let tab = self.workspace.active_tab();
-        let pane = &tab.panes[tab.active_pane];
-        let filename = tab.buffers[pane.buffer_idx].path.as_ref().and_then(|p| p.to_str());
+        // Get pane count and filename before potentially getting mutable reference
+        let pane_count = {
+            let tab = self.workspace.active_tab();
+            tab.panes.len()
+        };
+        let filename = {
+            let tab = self.workspace.active_tab();
+            let pane = &tab.panes[tab.active_pane];
+            tab.buffers[pane.buffer_idx].path.as_ref().and_then(|p| p.to_str()).map(|s| s.to_string())
+        };
+        let filename_ref = filename.as_deref();
 
         // Use multi-pane rendering if we have more than one pane
-        if tab.panes.len() > 1 {
+        if pane_count > 1 {
+            // Pre-compute is_modified for each buffer (needs mutable access)
+            let buffer_modified: Vec<bool> = {
+                let tab = self.workspace.active_tab_mut();
+                tab.buffers.iter_mut().map(|be| be.is_modified()).collect()
+            };
+
+            let tab = self.workspace.active_tab();
             // Build PaneInfo for each pane
             let pane_infos: Vec<PaneInfo> = tab.panes.iter().enumerate().map(|(i, pane)| {
                 let buffer_entry = &tab.buffers[pane.buffer_idx];
@@ -1163,45 +1299,60 @@ impl Editor {
                     },
                     is_active: i == tab.active_pane,
                     bracket_match,
-                    is_modified: buffer_entry.is_modified(),
+                    is_modified: buffer_modified[pane.buffer_idx],
                 }
             }).collect();
 
             self.screen.render_panes(
                 &pane_infos,
-                filename,
+                filename_ref,
                 self.message.as_deref(),
                 fuss_width,
                 top_offset,
             )
         } else {
             // Single pane - use simpler render path with syntax highlighting
-            let pane = &tab.panes[tab.active_pane];
-            let buffer_entry = &tab.buffers[pane.buffer_idx];
-            let buffer = &buffer_entry.buffer;
-            let cursors = &pane.cursors;
-            let viewport_line = pane.viewport_line;
-            let viewport_col = pane.viewport_col;
-            let is_modified = buffer_entry.is_modified();
-            let highlighter = &buffer_entry.highlighter;
+            // Get cached bracket match (this may compute it if not cached)
+            let bracket_match = self.get_bracket_match();
 
-            // Find matching bracket for primary cursor
-            let cursor = cursors.primary();
-            let bracket_match = buffer.find_matching_bracket(cursor.line, cursor.col);
+            // Get is_modified first (needs mutable access for hash caching)
+            let is_modified = {
+                let tab = self.workspace.active_tab_mut();
+                let pane = &tab.panes[tab.active_pane];
+                tab.buffers[pane.buffer_idx].is_modified()
+            };
 
-            self.screen.render_with_syntax(
-                buffer,
-                cursors,
-                viewport_line,
-                viewport_col,
-                filename,
-                self.message.as_deref(),
-                bracket_match,
-                fuss_width,
-                top_offset,
-                is_modified,
-                highlighter,
-            )?;
+            // Get values we need before mutable borrow for highlighter
+            let (viewport_line, viewport_col, cursors, line_count) = {
+                let tab = self.workspace.active_tab();
+                let pane = &tab.panes[tab.active_pane];
+                let buffer_entry = &tab.buffers[pane.buffer_idx];
+                let buffer = &buffer_entry.buffer;
+                let cursors = pane.cursors.clone();
+                (pane.viewport_line, pane.viewport_col, cursors, buffer.line_count())
+            };
+
+            // Now get mutable access to highlighter and buffer for rendering
+            {
+                let tab = self.workspace.active_tab_mut();
+                let buffer_idx = tab.panes[tab.active_pane].buffer_idx;
+                let buffer_entry = &mut tab.buffers[buffer_idx];
+                let buffer = &buffer_entry.buffer;
+
+                self.screen.render_with_syntax(
+                    buffer,
+                    &cursors,
+                    viewport_line,
+                    viewport_col,
+                    filename_ref,
+                    self.message.as_deref(),
+                    bracket_match,
+                    fuss_width,
+                    top_offset,
+                    is_modified,
+                    &mut buffer_entry.highlighter,
+                )?;
+            }
 
             // Render diagnostics markers in gutter
             if !self.lsp_state.diagnostics.is_empty() {
@@ -1218,7 +1369,7 @@ impl Editor {
                 let cursor = cursors.primary();
                 // Calculate cursor screen position
                 let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
-                let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+                let line_num_width = self.screen.line_number_width(line_count) as u16;
                 let cursor_col = cursor.col as u16 + line_num_width + 1;
 
                 self.screen.render_completion_popup(
@@ -1235,7 +1386,7 @@ impl Editor {
                 if let Some(ref hover) = self.lsp_state.hover {
                     let cursor = cursors.primary();
                     let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
-                    let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+                    let line_num_width = self.screen.line_number_width(line_count) as u16;
                     let cursor_col = cursor.col as u16 + line_num_width + 1;
 
                     self.screen.render_hover_popup(
@@ -1285,6 +1436,29 @@ impl Editor {
                 return Ok(()); // Modal handles cursor
             }
 
+            // Render file search modal if active
+            if let PromptState::FileSearch {
+                ref query,
+                ref results,
+                selected_index,
+                scroll_offset,
+                searching,
+            } = self.prompt {
+                // Convert results to tuple format for render function
+                let results_tuples: Vec<(PathBuf, usize, String)> = results
+                    .iter()
+                    .map(|r| (r.path.clone(), r.line_num, r.line_content.clone()))
+                    .collect();
+                self.screen.render_file_search_modal(
+                    query,
+                    &results_tuples,
+                    selected_index,
+                    scroll_offset,
+                    searching,
+                )?;
+                return Ok(()); // Modal handles cursor
+            }
+
             // Render find/replace bar if active (replaces status bar)
             if let PromptState::FindReplace {
                 ref find_query,
@@ -1311,7 +1485,7 @@ impl Editor {
             // (overlays may have moved the terminal cursor position)
             let cursor = cursors.primary();
             let cursor_row = (cursor.line.saturating_sub(viewport_line)) as u16 + top_offset;
-            let line_num_width = self.screen.line_number_width(buffer.line_count()) as u16;
+            let line_num_width = self.screen.line_number_width(line_count) as u16;
             // Account for horizontal scroll offset
             let cursor_screen_col = fuss_width + line_num_width + 1 + (cursor.col.saturating_sub(viewport_col)) as u16;
             self.screen.show_cursor_at(cursor_screen_col, cursor_row)?;
@@ -1406,14 +1580,33 @@ impl Editor {
                 }
                 // Dismiss completion popup with Escape
                 (Key::Escape, _) => {
-                    self.lsp_state.completion_visible = false;
-                    self.lsp_state.completions.clear();
+                    self.dismiss_completion();
                     return Ok(());
                 }
-                // Any other key dismisses popup and continues normally
+                // Backspace: remove from filter (if any) and continue
+                (Key::Backspace, _) => {
+                    if !self.lsp_state.completion_filter.is_empty() {
+                        self.lsp_state.completion_filter.pop();
+                        self.filter_completions();
+                    } else {
+                        // No filter left, dismiss popup
+                        self.dismiss_completion();
+                    }
+                    // Continue to normal backspace handling
+                }
+                // Character input: add to filter and continue typing
+                (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
+                    self.lsp_state.completion_filter.push(*c);
+                    self.filter_completions();
+                    // If no matches left, dismiss
+                    if self.lsp_state.completions.is_empty() {
+                        self.dismiss_completion();
+                    }
+                    // Continue to normal character handling
+                }
+                // Any other key dismisses popup
                 _ => {
-                    self.lsp_state.completion_visible = false;
-                    self.lsp_state.completions.clear();
+                    self.dismiss_completion();
                 }
             }
         }
@@ -1517,6 +1710,13 @@ impl Editor {
             // Join lines: Ctrl+J
             (Key::Char('j'), Modifiers { ctrl: true, .. }) => self.join_lines(),
 
+            // Toggle line comment: Ctrl+/
+            // Different terminals send: Ctrl+/, Ctrl+_, \x1f (ASCII 31), or Ctrl+7
+            (Key::Char('/'), Modifiers { ctrl: true, .. })
+            | (Key::Char('_'), Modifiers { ctrl: true, .. })
+            | (Key::Char('\x1f'), _)
+            | (Key::Char('7'), Modifiers { ctrl: true, .. }) => self.toggle_line_comment(),
+
             // Select line: Ctrl+L
             (Key::Char('l'), Modifiers { ctrl: true, .. }) => self.select_line(),
             // Select word: Ctrl+D (select word at cursor, or next occurrence if already selected)
@@ -1539,6 +1739,8 @@ impl Editor {
             // Go to line: Ctrl+G or F5
             (Key::Char('g'), Modifiers { ctrl: true, .. }) |
             (Key::F(5), _) => self.open_goto_line(),
+            // Multi-file search: F4
+            (Key::F(4), _) => self.open_file_search(),
 
             // === Editing ===
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
@@ -2291,6 +2493,10 @@ impl Editor {
             let deleted_text: String = self.buffer().slice(start_idx, end_idx).chars().collect();
             let cursor_before = self.cursor_pos();
 
+            // Invalidate caches
+            self.invalidate_highlight_cache(start.line);
+            self.invalidate_bracket_cache();
+
             self.buffer_mut().delete(start_idx, end_idx);
 
             self.cursor_mut().line = start.line;
@@ -2332,6 +2538,13 @@ impl Editor {
 
         // Step 2: Sort by ASCENDING char index (process from start of document)
         cursor_char_indices.sort_by(|a, b| a.1.cmp(&b.1));
+
+        // Invalidate caches from the earliest cursor's line
+        if let Some(&(first_cursor_idx, _)) = cursor_char_indices.first() {
+            let first_line = self.cursors().all()[first_cursor_idx].line;
+            self.invalidate_highlight_cache(first_line);
+        }
+        self.invalidate_bracket_cache();
 
         // Record all cursor positions before the operation
         let cursors_before = self.all_cursor_positions();
@@ -2381,9 +2594,12 @@ impl Editor {
         self.delete_selection();
 
         let cursor_before = self.cursor_pos();
+        let edit_line = self.cursor().line;
         let idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
 
         self.buffer_mut().insert(idx, text);
+        self.invalidate_highlight_cache(edit_line);
+        self.invalidate_bracket_cache();
         self.history_mut().record_insert(idx, text.to_string(), cursor_before, Position::new(0, 0));
 
         // Update cursor position
@@ -2663,6 +2879,15 @@ impl Editor {
             return;
         }
 
+        // Invalidate caches from cursor line (or previous line if merging)
+        let invalidate_line = if self.cursor().col == 0 && self.cursor().line > 0 {
+            self.cursor().line - 1
+        } else {
+            self.cursor().line
+        };
+        self.invalidate_highlight_cache(invalidate_line);
+        self.invalidate_bracket_cache();
+
         if self.cursor().col > 0 {
             let cursor_before = self.cursor_pos();
             let idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
@@ -2726,6 +2951,10 @@ impl Editor {
         if self.delete_selection() {
             return;
         }
+
+        // Invalidate caches from cursor line
+        self.invalidate_highlight_cache(self.cursor().line);
+        self.invalidate_bracket_cache();
 
         let line_len = self.buffer().line_len(self.cursor().line);
         let idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
@@ -3087,6 +3316,144 @@ impl Editor {
             let cursor_after = self.cursor_pos();
             self.history_mut().record_delete(idx, "\n".to_string(), cursor_before, cursor_after);
             self.history_mut().end_group();
+        }
+    }
+
+    /// Toggle line comment on current line or all lines in selection
+    /// Works like VSCode: if all lines are commented, uncomment them; otherwise comment them all
+    fn toggle_line_comment(&mut self) {
+        // Get the comment prefix for current language
+        let comment_prefix = match self.buffer_entry().highlighter.line_comment() {
+            Some(prefix) => prefix,
+            None => {
+                self.message = Some("No line comment syntax for this file type".to_string());
+                return;
+            }
+        };
+
+        // Determine line range to operate on
+        let (start_line, end_line) = if let Some((start, end)) = self.cursor().selection_bounds() {
+            // Selection: operate on all lines in selection
+            (start.line, end.line)
+        } else {
+            // No selection: operate on current line only
+            let line = self.cursor().line;
+            (line, line)
+        };
+
+        // Check if all lines in range are commented
+        let all_commented = (start_line..=end_line).all(|line_idx| {
+            if let Some(line) = self.buffer().line_str(line_idx) {
+                let trimmed = line.trim_start();
+                trimmed.starts_with(comment_prefix)
+            } else {
+                false
+            }
+        });
+
+        self.history_mut().begin_group();
+
+        if all_commented {
+            // Uncomment all lines
+            for line_idx in start_line..=end_line {
+                self.uncomment_line(line_idx, comment_prefix);
+            }
+        } else {
+            // Comment all lines - find minimum indentation first for alignment
+            let min_indent = (start_line..=end_line)
+                .filter_map(|line_idx| {
+                    self.buffer().line_str(line_idx).map(|line| {
+                        if line.trim().is_empty() {
+                            usize::MAX // Don't count empty lines
+                        } else {
+                            line.chars().take_while(|c| c.is_whitespace()).count()
+                        }
+                    })
+                })
+                .min()
+                .unwrap_or(0);
+
+            for line_idx in start_line..=end_line {
+                self.comment_line(line_idx, comment_prefix, min_indent);
+            }
+        }
+
+        self.history_mut().end_group();
+
+        // Invalidate highlight cache for affected lines
+        self.invalidate_highlight_cache(start_line);
+    }
+
+    /// Add a comment prefix to a line at the specified indentation level
+    fn comment_line(&mut self, line_idx: usize, prefix: &str, indent: usize) {
+        let Some(line) = self.buffer().line_str(line_idx) else {
+            return;
+        };
+
+        // Skip completely empty lines
+        if line.is_empty() {
+            return;
+        }
+
+        let cursor_before = self.cursor_pos();
+
+        // Insert comment prefix after the minimum indentation
+        let insert_pos = self.buffer().line_col_to_char(line_idx, indent);
+        let insert_text = format!("{} ", prefix);
+        self.buffer_mut().insert(insert_pos, &insert_text);
+
+        let cursor_after = self.cursor_pos();
+        self.history_mut().record_insert(insert_pos, insert_text, cursor_before, cursor_after);
+
+        // Adjust cursor if on this line and after the insert point
+        if self.cursor().line == line_idx && self.cursor().col >= indent {
+            let prefix_len = prefix.len() + 1; // +1 for space
+            self.cursor_mut().col += prefix_len;
+            self.cursor_mut().desired_col = self.cursor().col;
+        }
+    }
+
+    /// Remove a comment prefix from a line
+    fn uncomment_line(&mut self, line_idx: usize, prefix: &str) {
+        let Some(line) = self.buffer().line_str(line_idx) else {
+            return;
+        };
+
+        // Find where the comment prefix starts
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with(prefix) {
+            return;
+        }
+
+        let cursor_before = self.cursor_pos();
+
+        // Calculate the position of the comment prefix
+        let leading_spaces = line.len() - trimmed.len();
+        let delete_start = self.buffer().line_col_to_char(line_idx, leading_spaces);
+
+        // Calculate how much to delete (prefix + optional space after)
+        let delete_len = if trimmed.len() > prefix.len() && trimmed.chars().nth(prefix.len()) == Some(' ') {
+            prefix.len() + 1
+        } else {
+            prefix.len()
+        };
+
+        let delete_end = delete_start + delete_len;
+        let deleted_text: String = self.buffer().slice(delete_start, delete_end).chars().collect();
+        self.buffer_mut().delete(delete_start, delete_end);
+
+        let cursor_after = self.cursor_pos();
+        self.history_mut().record_delete(delete_start, deleted_text, cursor_before, cursor_after);
+
+        // Adjust cursor if on this line and after the deleted region
+        if self.cursor().line == line_idx && self.cursor().col > leading_spaces {
+            let new_col = if self.cursor().col >= leading_spaces + delete_len {
+                self.cursor().col - delete_len
+            } else {
+                leading_spaces
+            };
+            self.cursor_mut().col = new_col;
+            self.cursor_mut().desired_col = self.cursor().col;
         }
     }
 
@@ -3960,6 +4327,85 @@ impl Editor {
                     _ => {}
                 }
             }
+            PromptState::FileSearch {
+                ref mut query,
+                ref mut results,
+                ref mut selected_index,
+                ref mut scroll_offset,
+                searching: _,
+            } => {
+                match key {
+                    Key::Enter => {
+                        if !query.is_empty() && results.is_empty() {
+                            // Trigger search - clone query first to avoid borrow conflict
+                            let query_str = query.clone();
+                            let new_results = self.search_files(&query_str);
+                            // Re-borrow after search
+                            if let PromptState::FileSearch { results, selected_index, scroll_offset, .. } = &mut self.prompt {
+                                *results = new_results;
+                                *selected_index = 0;
+                                *scroll_offset = 0;
+                            }
+                        } else if !results.is_empty() {
+                            // Open selected result
+                            let result = results[*selected_index].clone();
+                            self.prompt = PromptState::None;
+                            self.file_search_open_result(&result);
+                        }
+                    }
+                    Key::Escape => {
+                        self.prompt = PromptState::None;
+                        self.message = None;
+                    }
+                    Key::Backspace => {
+                        if !query.is_empty() {
+                            query.pop();
+                            // Clear results when query changes
+                            results.clear();
+                            *selected_index = 0;
+                            *scroll_offset = 0;
+                        }
+                    }
+                    Key::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            if *selected_index < *scroll_offset {
+                                *scroll_offset = *selected_index;
+                            }
+                        }
+                    }
+                    Key::Down => {
+                        if *selected_index + 1 < results.len() {
+                            *selected_index += 1;
+                        }
+                    }
+                    Key::PageUp => {
+                        *selected_index = selected_index.saturating_sub(10);
+                        *scroll_offset = scroll_offset.saturating_sub(10);
+                    }
+                    Key::PageDown => {
+                        let max = results.len().saturating_sub(1);
+                        *selected_index = (*selected_index + 10).min(max);
+                    }
+                    Key::Home => {
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    Key::End => {
+                        if !results.is_empty() {
+                            *selected_index = results.len() - 1;
+                        }
+                    }
+                    Key::Char(c) => {
+                        query.push(c);
+                        // Clear results when query changes
+                        results.clear();
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -4191,7 +4637,7 @@ impl Editor {
         let buffer = self.buffer();
         let line_count = buffer.line_count();
         let lines: Vec<String> = (0..line_count)
-            .filter_map(|i| buffer.line_str(i).map(|s| s.to_string()))
+            .filter_map(|i| buffer.line_str(i))
             .collect();
 
         // Now search through the collected lines
@@ -4208,16 +4654,19 @@ impl Editor {
             if let Ok(re) = regex::Regex::new(&pattern) {
                 for (line_idx, line) in lines.iter().enumerate() {
                     for mat in re.find_iter(line) {
+                        // Convert byte positions to char positions for proper cursor placement
+                        let start_col = line[..mat.start()].chars().count();
+                        let match_char_len = line[mat.start()..mat.end()].chars().count();
                         matches.push(SearchMatch {
                             line: line_idx,
-                            start_col: mat.start(),
-                            end_col: mat.end(),
+                            start_col,
+                            end_col: start_col + match_char_len,
                         });
                     }
                 }
             }
         } else {
-            // Plain text search
+            // Plain text search - optimized version using str::find()
             let search_query = if case_insensitive {
                 query.to_lowercase()
             } else {
@@ -4225,31 +4674,42 @@ impl Editor {
             };
             let query_char_len = query.chars().count();
 
+            // Reusable buffer for case-insensitive search to avoid allocations
+            let mut lowered_line = String::new();
+
             for (line_idx, line) in lines.iter().enumerate() {
-                let search_line = if case_insensitive {
-                    line.to_lowercase()
+                // Get the search line (reuse buffer for case-insensitive)
+                let search_line: &str = if case_insensitive {
+                    lowered_line.clear();
+                    for c in line.chars() {
+                        for lc in c.to_lowercase() {
+                            lowered_line.push(lc);
+                        }
+                    }
+                    &lowered_line
                 } else {
-                    line.clone()
+                    line
                 };
 
-                // Search using character positions, not byte positions
-                let line_chars: Vec<char> = search_line.chars().collect();
-                let query_chars: Vec<char> = search_query.chars().collect();
+                // Use str::find() which is SIMD-optimized for byte search
+                // Then convert byte positions to char positions
+                let mut byte_offset = 0;
+                while let Some(byte_pos) = search_line[byte_offset..].find(&search_query) {
+                    let abs_byte_pos = byte_offset + byte_pos;
 
-                for start_col in 0..line_chars.len() {
-                    if start_col + query_chars.len() > line_chars.len() {
+                    // Convert byte position to char position
+                    let start_col = search_line[..abs_byte_pos].chars().count();
+
+                    matches.push(SearchMatch {
+                        line: line_idx,
+                        start_col,
+                        end_col: start_col + query_char_len,
+                    });
+
+                    // Move past this match (by at least one byte, or query length)
+                    byte_offset = abs_byte_pos + search_query.len().max(1);
+                    if byte_offset >= search_line.len() {
                         break;
-                    }
-                    let matches_here = line_chars[start_col..start_col + query_chars.len()]
-                        .iter()
-                        .zip(query_chars.iter())
-                        .all(|(a, b)| a == b);
-                    if matches_here {
-                        matches.push(SearchMatch {
-                            line: line_idx,
-                            start_col,
-                            end_col: start_col + query_char_len,
-                        });
                     }
                 }
             }
@@ -4535,6 +4995,141 @@ impl Editor {
             // Sync with LSP
             self.sync_document_to_lsp();
         }
+    }
+
+    /// Open multi-file search modal (F4)
+    fn open_file_search(&mut self) {
+        self.prompt = PromptState::FileSearch {
+            query: String::new(),
+            results: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            searching: false,
+        };
+    }
+
+    /// Search files in workspace for query string (grep-like)
+    /// Uses streaming file reading to avoid loading entire files into memory
+    fn search_files(&self, query: &str) -> Vec<FileSearchResult> {
+        use std::io::{BufRead, BufReader};
+        use std::fs::File;
+
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        let root = &self.workspace.root;
+        let query_lower = query.to_lowercase();
+
+        // Walk directory tree
+        fn walk_dir(
+            dir: &Path,
+            query_lower: &str,
+            results: &mut Vec<FileSearchResult>,
+            root: &Path,
+        ) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+
+            for entry in entries.flatten() {
+                // Check result limit early to avoid unnecessary work
+                if results.len() >= 500 {
+                    return;
+                }
+
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                // Skip hidden files/dirs
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                // Skip common non-text directories
+                if path.is_dir() {
+                    if matches!(name, "target" | "node_modules" | "build" | "dist" | "__pycache__") {
+                        continue;
+                    }
+                    walk_dir(&path, query_lower, results, root);
+                } else if path.is_file() {
+                    // Skip binary/large files by extension
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "ico" | "woff" | "woff2" | "ttf" | "eot" | "pdf" | "zip" | "tar" | "gz" | "exe" | "dll" | "so" | "dylib" | "o" | "a" | "rlib") {
+                        continue;
+                    }
+
+                    // Stream file line-by-line instead of loading entire file
+                    let Ok(file) = File::open(&path) else {
+                        continue;
+                    };
+                    let reader = BufReader::new(file);
+                    let rel_path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+
+                    // Reusable buffer for lowercasing
+                    let mut line_lower = String::new();
+
+                    for (line_idx, line_result) in reader.lines().enumerate() {
+                        // Check result limit
+                        if results.len() >= 500 {
+                            return;
+                        }
+
+                        let Ok(line) = line_result else {
+                            // Non-UTF8 content - likely binary, skip file
+                            break;
+                        };
+
+                        // Reuse buffer for lowercase conversion
+                        line_lower.clear();
+                        for c in line.chars() {
+                            for lc in c.to_lowercase() {
+                                line_lower.push(lc);
+                            }
+                        }
+
+                        if line_lower.contains(query_lower) {
+                            results.push(FileSearchResult {
+                                path: rel_path.clone(),
+                                line_num: line_idx + 1,
+                                line_content: line.trim().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        walk_dir(root, &query_lower, &mut results, root);
+        results
+    }
+
+    /// Open file at the location from a file search result
+    fn file_search_open_result(&mut self, result: &FileSearchResult) {
+        let full_path = self.workspace.root.join(&result.path);
+
+        if let Err(e) = self.workspace.open_file(&full_path) {
+            self.message = Some(format!("Failed to open file: {}", e));
+            return;
+        }
+
+        // Sync with LSP
+        self.sync_document_to_lsp();
+
+        // Go to line
+        let line = result.line_num.saturating_sub(1); // Convert to 0-indexed
+        let tab = self.workspace.active_tab_mut();
+        let max_line = tab.active_buffer().buffer.line_count().saturating_sub(1);
+        let target_line = line.min(max_line);
+
+        let pane = tab.active_pane_mut();
+        pane.cursors.primary_mut().line = target_line;
+        pane.cursors.primary_mut().col = 0;
+
+        // Center the line in viewport
+        let viewport_height = self.screen.rows.saturating_sub(2) as usize;
+        pane.viewport_line = target_line.saturating_sub(viewport_height / 2);
     }
 }
 
