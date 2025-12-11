@@ -2710,6 +2710,215 @@ impl Screen {
         Ok(())
     }
 
+    /// Render the help menu modal (Shift+F1)
+    pub fn render_help_menu(
+        &mut self,
+        query: &str,
+        keybinds: &[(String, String, String)], // (shortcut, description, category)
+        selected_index: usize,
+        scroll_offset: usize,
+    ) -> Result<()> {
+        let (width, height) = (self.cols as usize, self.rows as usize);
+
+        // Modal dimensions - larger to show keybindings comfortably
+        let modal_width = 70.min(width - 4);
+        let modal_height = 24.min(height - 4);
+        let start_col = (width.saturating_sub(modal_width)) / 2;
+        let start_row = 1; // Near top of screen
+
+        // Colors - sleek dark theme matching command palette
+        let bg = Color::AnsiValue(236);
+        let border_color = Color::AnsiValue(240);
+        let title_color = Color::Cyan;
+        let category_color = Color::AnsiValue(243);
+        let shortcut_color = Color::Yellow;
+        let desc_color = Color::White;
+        let selected_bg = Color::AnsiValue(24); // Blue highlight
+        let input_bg = Color::AnsiValue(238);
+
+        // Draw top border with title
+        let title = " Keybindings ";
+        let title_padding = (modal_width.saturating_sub(title.len() + 2)) / 2;
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, start_row as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("╭"),
+            Print(format!("{:─<width$}", "", width = title_padding)),
+            SetForegroundColor(title_color),
+            SetAttribute(crossterm::style::Attribute::Bold),
+            Print(title),
+            SetAttribute(crossterm::style::Attribute::Reset),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}", "", width = modal_width.saturating_sub(title_padding + title.len() + 2))),
+            Print("╮"),
+            ResetColor,
+        )?;
+
+        // Draw search input row
+        let display_query = if query.is_empty() { "Type to filter..." } else { query };
+        let input_display_width = modal_width.saturating_sub(6);
+        let placeholder_color = if query.is_empty() { Color::AnsiValue(243) } else { Color::White };
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 1) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("│ "),
+            SetBackgroundColor(input_bg),
+            SetForegroundColor(placeholder_color),
+            Print(format!(" {:<width$}", display_query, width = input_display_width)),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(" │"),
+            ResetColor,
+        )?;
+
+        // Draw separator
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, (start_row + 2) as u16),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("├{:─<width$}┤", "", width = modal_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Calculate visible range
+        let visible_rows = modal_height.saturating_sub(5);
+
+        // Adjust scroll offset for visibility
+        let scroll = if selected_index < scroll_offset {
+            selected_index
+        } else if selected_index >= scroll_offset + visible_rows {
+            selected_index - visible_rows + 1
+        } else {
+            scroll_offset
+        };
+
+        // Track current category for headers
+        let mut last_category = String::new();
+
+        // Draw keybindings
+        let mut row_offset = 0;
+        for (idx, (shortcut, description, category)) in keybinds.iter().enumerate().skip(scroll) {
+            if row_offset >= visible_rows {
+                break;
+            }
+
+            let row = (start_row + 3 + row_offset) as u16;
+            let is_selected = idx == selected_index;
+
+            // Check if we're starting a new category (only when not filtering)
+            if query.is_empty() && category != &last_category {
+                last_category = category.clone();
+            }
+
+            let item_bg = if is_selected { selected_bg } else { bg };
+
+            // Format: Shortcut (fixed width)   Description
+            let shortcut_width = 20;
+            let desc_width = modal_width.saturating_sub(shortcut_width + 8);
+
+            // Truncate description if needed
+            let display_desc = if description.len() > desc_width {
+                format!("{}…", &description[..desc_width.saturating_sub(1)])
+            } else {
+                description.clone()
+            };
+
+            // Truncate shortcut if needed
+            let display_shortcut = if shortcut.len() > shortcut_width {
+                format!("{}…", &shortcut[..shortcut_width.saturating_sub(1)])
+            } else {
+                shortcut.clone()
+            };
+
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(item_bg),
+                SetForegroundColor(border_color),
+                Print("│ "),
+                SetForegroundColor(shortcut_color),
+                SetAttribute(crossterm::style::Attribute::Bold),
+                Print(format!("{:<width$}", display_shortcut, width = shortcut_width)),
+                SetAttribute(crossterm::style::Attribute::Reset),
+                SetBackgroundColor(item_bg),
+                SetForegroundColor(desc_color),
+                Print(format!(" {:<width$}", display_desc, width = desc_width)),
+                SetForegroundColor(category_color),
+                Print(format!(" {:>6}", if row_offset == 0 || query.is_empty() && keybinds.get(idx.wrapping_sub(1)).map(|(_, _, c)| c != category).unwrap_or(true) { category.as_str() } else { "" })),
+                SetForegroundColor(border_color),
+                Print(" │"),
+                ResetColor,
+            )?;
+
+            row_offset += 1;
+        }
+
+        // Fill remaining rows
+        for i in row_offset..visible_rows {
+            let row = (start_row + 3 + i) as u16;
+            execute!(
+                self.stdout,
+                MoveTo(start_col as u16, row),
+                SetBackgroundColor(bg),
+                SetForegroundColor(border_color),
+                Print(format!("│{:width$}│", "", width = modal_width.saturating_sub(2))),
+                ResetColor,
+            )?;
+        }
+
+        // Draw info row
+        let info_row = (start_row + 3 + visible_rows) as u16;
+        let result_count = if keybinds.is_empty() {
+            "No matches".to_string()
+        } else {
+            format!("{} keybinds", keybinds.len())
+        };
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, info_row),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print("├"),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!(" {} ", result_count)),
+            SetForegroundColor(border_color),
+            Print(format!("{:─<width$}", "", width = modal_width.saturating_sub(result_count.len() + 4))),
+            Print("┤"),
+            ResetColor,
+        )?;
+
+        // Draw bottom border
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, info_row + 1),
+            SetBackgroundColor(bg),
+            SetForegroundColor(border_color),
+            Print(format!("╰{:─<width$}╯", "", width = modal_width.saturating_sub(2))),
+            ResetColor,
+        )?;
+
+        // Show help text below
+        let help_text = "↑↓:scroll  PgUp/PgDn:page  Home/End:jump  Esc:close";
+        execute!(
+            self.stdout,
+            MoveTo(start_col as u16, info_row + 2),
+            SetForegroundColor(Color::AnsiValue(243)),
+            Print(format!("{:^width$}", help_text, width = modal_width)),
+            ResetColor,
+        )?;
+
+        // Hide cursor when in modal
+        execute!(self.stdout, Hide)?;
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+
     /// Render the LSP references panel (sidebar style)
     pub fn render_references_panel(
         &mut self,

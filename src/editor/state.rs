@@ -128,6 +128,134 @@ const ALL_COMMANDS: &[PaletteCommand] = &[
 
     // Help
     PaletteCommand::new("Command Palette", "Ctrl+P", "Help", "command-palette"),
+    PaletteCommand::new("Help / Keybindings", "Shift+F1", "Help", "help"),
+];
+
+/// A keybinding entry for the help menu
+#[derive(Debug, Clone, PartialEq)]
+struct HelpKeybind {
+    /// Keyboard shortcut (e.g., "Ctrl+S")
+    shortcut: &'static str,
+    /// Description of what the keybind does
+    description: &'static str,
+    /// Category for grouping
+    category: &'static str,
+}
+
+impl HelpKeybind {
+    const fn new(shortcut: &'static str, description: &'static str, category: &'static str) -> Self {
+        Self { shortcut, description, category }
+    }
+}
+
+/// All keybindings for the help menu - comprehensive list
+const ALL_KEYBINDS: &[HelpKeybind] = &[
+    // File Operations
+    HelpKeybind::new("Ctrl+S", "Save file", "File"),
+    HelpKeybind::new("Ctrl+O", "Open file browser (Fortress)", "File"),
+    HelpKeybind::new("Ctrl+Q", "Quit editor", "File"),
+    HelpKeybind::new("Ctrl+B / F3", "Toggle file explorer", "File"),
+
+    // Tabs
+    HelpKeybind::new("Alt+T", "New tab", "Tabs"),
+    HelpKeybind::new("Alt+Q", "Close tab/pane", "Tabs"),
+    HelpKeybind::new("Alt+.", "Next tab", "Tabs"),
+    HelpKeybind::new("Alt+,", "Previous tab", "Tabs"),
+    HelpKeybind::new("Alt+1-9", "Switch to tab 1-9", "Tabs"),
+
+    // Panes
+    HelpKeybind::new("Alt+V", "Split vertical", "Panes"),
+    HelpKeybind::new("Alt+S", "Split horizontal", "Panes"),
+    HelpKeybind::new("Alt+H/J/K/L", "Navigate panes (vim-style)", "Panes"),
+    HelpKeybind::new("Alt+N", "Next pane", "Panes"),
+    HelpKeybind::new("Alt+P", "Previous pane", "Panes"),
+
+    // Editing
+    HelpKeybind::new("Ctrl+Z", "Undo", "Edit"),
+    HelpKeybind::new("Ctrl+Shift+Z", "Redo", "Edit"),
+    HelpKeybind::new("Ctrl+C", "Copy", "Edit"),
+    HelpKeybind::new("Ctrl+X", "Cut", "Edit"),
+    HelpKeybind::new("Ctrl+V", "Paste", "Edit"),
+    HelpKeybind::new("Ctrl+J", "Join lines", "Edit"),
+    HelpKeybind::new("Ctrl+/", "Toggle line comment", "Edit"),
+    HelpKeybind::new("Ctrl+T", "Transpose characters", "Edit"),
+    HelpKeybind::new("Tab", "Indent", "Edit"),
+    HelpKeybind::new("Shift+Tab", "Outdent", "Edit"),
+    HelpKeybind::new("Backspace", "Delete backward", "Edit"),
+    HelpKeybind::new("Delete", "Delete forward", "Edit"),
+    HelpKeybind::new("Ctrl+W", "Delete word backward", "Edit"),
+    HelpKeybind::new("Alt+D", "Delete word forward", "Edit"),
+    HelpKeybind::new("Alt+Backspace", "Delete word backward", "Edit"),
+
+    // Line Operations
+    HelpKeybind::new("Alt+Up", "Move line up", "Lines"),
+    HelpKeybind::new("Alt+Down", "Move line down", "Lines"),
+    HelpKeybind::new("Alt+Shift+Up", "Duplicate line up", "Lines"),
+    HelpKeybind::new("Alt+Shift+Down", "Duplicate line down", "Lines"),
+
+    // Movement
+    HelpKeybind::new("Arrow keys", "Move cursor", "Movement"),
+    HelpKeybind::new("Home / Ctrl+A", "Go to line start (smart)", "Movement"),
+    HelpKeybind::new("End / Ctrl+E", "Go to line end", "Movement"),
+    HelpKeybind::new("Alt+Left / Alt+B", "Move word left", "Movement"),
+    HelpKeybind::new("Alt+Right / Alt+F", "Move word right", "Movement"),
+    HelpKeybind::new("PageUp", "Page up", "Movement"),
+    HelpKeybind::new("PageDown", "Page down", "Movement"),
+    HelpKeybind::new("Ctrl+G / F5", "Go to line", "Movement"),
+
+    // Selection
+    HelpKeybind::new("Shift+Arrow", "Extend selection", "Selection"),
+    HelpKeybind::new("Ctrl+L", "Select line", "Selection"),
+    HelpKeybind::new("Ctrl+D", "Select word / next occurrence", "Selection"),
+    HelpKeybind::new("Escape", "Clear selection / collapse cursors", "Selection"),
+    HelpKeybind::new("Ctrl+Alt+Up", "Add cursor above", "Selection"),
+    HelpKeybind::new("Ctrl+Alt+Down", "Add cursor below", "Selection"),
+
+    // Search
+    HelpKeybind::new("Ctrl+F", "Find", "Search"),
+    HelpKeybind::new("Ctrl+R", "Find and replace", "Search"),
+    HelpKeybind::new("F3", "Find next", "Search"),
+    HelpKeybind::new("Shift+F3", "Find previous", "Search"),
+    HelpKeybind::new("F4", "Search in files", "Search"),
+    HelpKeybind::new("Alt+I", "Toggle case sensitivity (in find)", "Search"),
+    HelpKeybind::new("Alt+X", "Toggle regex mode (in find)", "Search"),
+    HelpKeybind::new("Alt+Enter", "Replace all (in find)", "Search"),
+
+    // Brackets & Quotes
+    HelpKeybind::new("Alt+[ / Alt+]", "Jump to matching bracket", "Brackets"),
+    HelpKeybind::new("Alt+'", "Cycle quote type (\"/'/`)", "Brackets"),
+    HelpKeybind::new("Alt+\"", "Remove surrounding quotes", "Brackets"),
+    HelpKeybind::new("Alt+(", "Cycle bracket type (/{/[)", "Brackets"),
+    HelpKeybind::new("Alt+)", "Remove surrounding brackets", "Brackets"),
+
+    // LSP / Code Intelligence
+    HelpKeybind::new("F1", "Show hover info", "LSP"),
+    HelpKeybind::new("F2", "Rename symbol", "LSP"),
+    HelpKeybind::new("F12", "Go to definition", "LSP"),
+    HelpKeybind::new("Shift+F12", "Find references", "LSP"),
+    HelpKeybind::new("Ctrl+N", "Trigger completion", "LSP"),
+    HelpKeybind::new("Alt+M", "LSP server manager", "LSP"),
+
+    // Help & Commands
+    HelpKeybind::new("Ctrl+P", "Command palette", "Help"),
+    HelpKeybind::new("Shift+F1", "Help / keybindings", "Help"),
+
+    // File Explorer (Fortress/Fuss mode)
+    HelpKeybind::new("Up/Down", "Navigate files", "Explorer"),
+    HelpKeybind::new("Enter", "Open file/directory", "Explorer"),
+    HelpKeybind::new("Right", "Expand directory", "Explorer"),
+    HelpKeybind::new("Left", "Collapse / go to parent", "Explorer"),
+    HelpKeybind::new("Space", "Toggle selection", "Explorer"),
+    HelpKeybind::new("a", "Add file", "Explorer"),
+    HelpKeybind::new("d", "Delete selected", "Explorer"),
+    HelpKeybind::new("m", "Move/rename selected", "Explorer"),
+    HelpKeybind::new("p", "Paste", "Explorer"),
+    HelpKeybind::new("u", "Undo last action", "Explorer"),
+    HelpKeybind::new("f", "Create folder", "Explorer"),
+    HelpKeybind::new("t", "Open in new tab", "Explorer"),
+    HelpKeybind::new("l", "Open in vertical split", "Explorer"),
+    HelpKeybind::new("Alt+G", "Git status", "Explorer"),
+    HelpKeybind::new("Alt+.", "Toggle hidden files", "Explorer"),
 ];
 
 /// Prompt state for quit confirmation
@@ -201,6 +329,17 @@ enum PromptState {
         query: String,
         /// Filtered commands matching query
         filtered: Vec<PaletteCommand>,
+        /// Currently selected index
+        selected_index: usize,
+        /// Scroll offset for long lists
+        scroll_offset: usize,
+    },
+    /// Help menu (Shift+F1)
+    HelpMenu {
+        /// Search/filter query
+        query: String,
+        /// Filtered keybinds matching query
+        filtered: Vec<HelpKeybind>,
         /// Currently selected index
         selected_index: usize,
         /// Scroll offset for long lists
@@ -1588,6 +1727,27 @@ impl Editor {
                 return Ok(()); // Modal handles cursor
             }
 
+            // Render help menu if active
+            if let PromptState::HelpMenu {
+                ref query,
+                ref filtered,
+                selected_index,
+                scroll_offset,
+            } = self.prompt {
+                // Convert keybinds to tuple format for render function
+                let keybinds_tuples: Vec<(String, String, String)> = filtered
+                    .iter()
+                    .map(|kb| (kb.shortcut.to_string(), kb.description.to_string(), kb.category.to_string()))
+                    .collect();
+                self.screen.render_help_menu(
+                    query,
+                    &keybinds_tuples,
+                    selected_index,
+                    scroll_offset,
+                )?;
+                return Ok(()); // Modal handles cursor
+            }
+
             // Render find/replace bar if active (replaces status bar)
             if let PromptState::FindReplace {
                 ref find_query,
@@ -1964,13 +2124,17 @@ impl Editor {
             // Find references: Shift+F12
             (Key::F(12), Modifiers { shift: true, .. }) => self.lsp_find_references(),
             // Hover info: F1
-            (Key::F(1), _) => self.lsp_hover(),
+            (Key::F(1), Modifiers { shift: false, .. }) => self.lsp_hover(),
             // Code completion: Ctrl+N (vim-style)
             (Key::Char('n'), Modifiers { ctrl: true, .. }) => self.lsp_complete(),
             // Rename: F2
             (Key::F(2), _) => self.lsp_rename(),
             // Server manager: Alt+M
             (Key::Char('m'), Modifiers { alt: true, .. }) => self.toggle_server_manager(),
+
+            // === Help ===
+            // Help / keybindings: Shift+F1
+            (Key::F(1), Modifiers { shift: true, .. }) => self.open_help_menu(),
 
             _ => {}
         }
@@ -4616,6 +4780,72 @@ impl Editor {
                     _ => {}
                 }
             }
+            PromptState::HelpMenu {
+                ref mut query,
+                ref mut filtered,
+                ref mut selected_index,
+                ref mut scroll_offset,
+            } => {
+                match key {
+                    Key::Escape | Key::Enter => {
+                        self.prompt = PromptState::None;
+                    }
+                    Key::Up => {
+                        if *selected_index > 0 {
+                            *selected_index -= 1;
+                            if *selected_index < *scroll_offset {
+                                *scroll_offset = *selected_index;
+                            }
+                        }
+                    }
+                    Key::Down => {
+                        if *selected_index + 1 < filtered.len() {
+                            *selected_index += 1;
+                            let visible_rows = 18;
+                            if *selected_index >= *scroll_offset + visible_rows {
+                                *scroll_offset = selected_index.saturating_sub(visible_rows - 1);
+                            }
+                        }
+                    }
+                    Key::PageUp => {
+                        *selected_index = selected_index.saturating_sub(10);
+                        if *selected_index < *scroll_offset {
+                            *scroll_offset = *selected_index;
+                        }
+                    }
+                    Key::PageDown => {
+                        *selected_index = (*selected_index + 10).min(filtered.len().saturating_sub(1));
+                        let visible_rows = 18;
+                        if *selected_index >= *scroll_offset + visible_rows {
+                            *scroll_offset = selected_index.saturating_sub(visible_rows - 1);
+                        }
+                    }
+                    Key::Home => {
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    Key::End => {
+                        *selected_index = filtered.len().saturating_sub(1);
+                        let visible_rows = 18;
+                        *scroll_offset = selected_index.saturating_sub(visible_rows - 1);
+                    }
+                    Key::Backspace => {
+                        if !query.is_empty() {
+                            query.pop();
+                            *filtered = filter_keybinds(query);
+                            *selected_index = 0;
+                            *scroll_offset = 0;
+                        }
+                    }
+                    Key::Char(c) => {
+                        query.push(c);
+                        *filtered = filter_keybinds(query);
+                        *selected_index = 0;
+                        *scroll_offset = 0;
+                    }
+                    _ => {}
+                }
+            }
             PromptState::None => {}
         }
         Ok(())
@@ -5472,11 +5702,25 @@ impl Editor {
 
             // Help
             "command-palette" => {} // Already open
+            "help" => self.open_help_menu(),
 
             _ => {
                 self.message = Some(format!("Unknown command: {}", command_id));
             }
         }
+    }
+
+    // === Help Menu ===
+
+    /// Open the help menu with keybindings
+    fn open_help_menu(&mut self) {
+        let filtered = filter_keybinds("");
+        self.prompt = PromptState::HelpMenu {
+            query: String::new(),
+            filtered,
+            selected_index: 0,
+            scroll_offset: 0,
+        };
     }
 }
 
@@ -5556,6 +5800,35 @@ fn filter_commands(query: &str) -> Vec<PaletteCommand> {
     // Sort by score descending
     filtered.sort_by(|a, b| b.score.cmp(&a.score));
     filtered
+}
+
+/// Filter keybinds by fuzzy match (for help menu)
+fn filter_keybinds(query: &str) -> Vec<HelpKeybind> {
+    if query.is_empty() {
+        // Return all keybinds in original order (grouped by category)
+        return ALL_KEYBINDS.to_vec();
+    }
+
+    let mut filtered: Vec<(HelpKeybind, i32)> = ALL_KEYBINDS
+        .iter()
+        .filter_map(|kb| {
+            // Match against shortcut, description, or category
+            let shortcut_score = fuzzy_match_score(kb.shortcut, query);
+            let desc_score = fuzzy_match_score(kb.description, query);
+            let category_score = fuzzy_match_score(kb.category, query) / 2;
+
+            let score = shortcut_score.max(desc_score).max(category_score);
+            if score > 0 {
+                Some((kb.clone(), score))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by score descending
+    filtered.sort_by(|a, b| b.1.cmp(&a.1));
+    filtered.into_iter().map(|(kb, _)| kb).collect()
 }
 
 impl Drop for Editor {

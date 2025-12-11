@@ -7,7 +7,7 @@ authors = ["Matthew Forrester Wolffe"]
 
 [dependencies]
 # Terminal
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["libc"] }
 
 # Text handling
 ropey = "1.6"
@@ -38,6 +38,10 @@ path = "src/main.rs"
 [[bin]]
 name = "fac"
 path = "src/main.rs"
+
+[[bin]]
+name = "keytest"
+path = "src/bin/keytest.rs"
 
 [profile.release]
 opt-level = 3
