@@ -1,0 +1,57 @@
+# LSP Test 2: Code Completion (Ctrl+Space)
+# =========================================
+# 
+# Instructions:
+# 1. Place cursor after a dot or partial word
+# 2. Press Ctrl+Space to trigger completion
+# 3. Use Up/Down arrows to navigate suggestions
+# 4. Press Enter or Tab to accept a completion
+# 5. Press Escape to dismiss without completing
+#
+# Try completing at the marked positions below:
+
+import os
+import json
+from pathlib import Path
+
+# Test 1: Module completions
+# Place cursor after "os." and press Ctrl+Space
+path = os.  # <- complete here (try: getcwd, path, environ)
+
+# Test 2: String method completions
+# Place cursor after "text." and press Ctrl+Space
+text = "hello world"
+upper = text.  # <- complete here (try: upper, lower, split, strip)
+
+# Test 3: List method completions
+numbers = [3, 1, 4, 1, 5]
+numbers.  # <- complete here (try: append, sort, reverse, pop)
+
+# Test 4: Dict method completions
+data = {"name": "test", "value": 42}
+keys = data.  # <- complete here (try: keys, values, items, get)
+
+# Test 5: Path object completions
+p = Path("/tmp")
+p.  # <- complete here (try: exists, is_file, read_text, mkdir)
+
+# Test 6: Partial word completion
+# Type "pri" and press Ctrl+Space to complete to "print"
+# pri  # <- uncomment and complete
+
+# Test 7: Import completion
+# from pathlib import P  # <- complete after P (Path, PurePath, etc.)
+
+
+class MyClass:
+    def __init__(self):
+        self.value = 100
+        self.name = "test"
+
+    def process(self):
+        # Test 8: Self completions
+        return self.  # <- complete here (try: value, name)
+
+
+obj = MyClass()
+obj.  # <- complete here (try: value, name, process)
