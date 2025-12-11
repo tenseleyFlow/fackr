@@ -12,12 +12,13 @@ fn main() -> io::Result<()> {
     terminal::enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
 
-    // Try to enable keyboard enhancement
+    // Try to enable keyboard enhancement (same flags as main editor)
+    // REPORT_ALTERNATE_KEYS makes crossterm use the shifted character directly
     let enhanced = execute!(
         io::stdout(),
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
         )
     ).is_ok();
 

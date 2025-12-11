@@ -94,12 +94,15 @@ impl Screen {
         execute!(self.stdout, EnterAlternateScreen, Hide, EnableMouseCapture)?;
 
         // Try to enable keyboard enhancement for better modifier key detection
-        // This enables the kitty keyboard protocol on supporting terminals
+        // This enables the kitty keyboard protocol on supporting terminals.
+        // We use REPORT_ALTERNATE_KEYS so crossterm receives the shifted character
+        // (e.g., 'A' instead of 'a' with shift modifier) for consistent behavior.
+        // See: https://github.com/helix-editor/helix/pull/4939
         if execute!(
             self.stdout,
             PushKeyboardEnhancementFlags(
                 KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
             )
         )
         .is_ok()

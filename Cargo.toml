@@ -36,10 +36,6 @@ name = "fackr"
 path = "src/main.rs"
 
 [[bin]]
-name = "fac"
-path = "src/main.rs"
-
-[[bin]]
 name = "keytest"
 path = "src/bin/keytest.rs"
 
