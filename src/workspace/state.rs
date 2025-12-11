@@ -95,6 +95,37 @@ impl BufferEntry {
         }
     }
 
+    /// Create an empty buffer for a new file that doesn't exist yet
+    pub fn new_file(path: &Path, workspace_root: &Path) -> Self {
+        let buffer = Buffer::new();
+        let is_orphan = !path.starts_with(workspace_root);
+
+        // Store relative path for workspace files, absolute for orphans
+        let stored_path = if is_orphan {
+            path.to_path_buf()
+        } else {
+            path.strip_prefix(workspace_root)
+                .unwrap_or(path)
+                .to_path_buf()
+        };
+
+        // Detect language for syntax highlighting
+        let mut highlighter = Highlighter::new();
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            highlighter.detect_language(filename);
+        }
+
+        Self {
+            path: Some(stored_path),
+            buffer,
+            history: History::new(),
+            highlighter,
+            is_orphan,
+            saved_hash: None, // Not saved yet - will prompt on close
+            saved_len: None,
+        }
+    }
+
     pub fn from_file(path: &Path, workspace_root: &Path) -> Result<Self> {
         let mut buffer = Buffer::load(path)?;
         let saved_hash = Some(buffer.content_hash()); // Hash at load time
@@ -235,6 +266,16 @@ impl Tab {
             panes: vec![Pane::new()],
             active_pane: 0,
         })
+    }
+
+    /// Create a tab for a new file that doesn't exist yet
+    pub fn new_file(path: &Path, workspace_root: &Path) -> Self {
+        let buffer_entry = BufferEntry::new_file(path, workspace_root);
+        Self {
+            buffers: vec![buffer_entry],
+            panes: vec![Pane::new()],
+            active_pane: 0,
+        }
     }
 
     /// Create a tab from string content (for diff views, etc.)
@@ -627,9 +668,12 @@ impl Workspace {
 
         let mut workspace = Self::open(root)?;
 
-        // Open the file in a tab
+        // Open the file in a tab (or create new file if it doesn't exist)
         if abs_path.exists() {
             workspace.open_file(&abs_path)?;
+        } else if abs_path.extension().is_some() || abs_path.file_name().is_some() {
+            // Path looks like a file (has extension or filename) - create new file buffer
+            workspace.open_new_file(&abs_path)?;
         }
 
         Ok(workspace)
@@ -702,6 +746,14 @@ impl Workspace {
             let _ = self.lsp.open_document(&path_str, &content);
         }
 
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        Ok(())
+    }
+
+    /// Open a new file (doesn't exist yet) in a new tab
+    pub fn open_new_file(&mut self, path: &Path) -> Result<()> {
+        let tab = Tab::new_file(path, &self.root);
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
         Ok(())

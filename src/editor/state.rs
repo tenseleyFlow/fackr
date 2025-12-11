@@ -4608,13 +4608,10 @@ impl Editor {
                         }
                     }
                     Key::Char(c) => {
-                        // Only accept printable characters
-                        if !c.is_control() {
-                            query.push(c);
-                            *filtered = filter_commands(query);
-                            *selected_index = 0;
-                            *scroll_offset = 0;
-                        }
+                        query.push(c);
+                        *filtered = filter_commands(query);
+                        *selected_index = 0;
+                        *scroll_offset = 0;
                     }
                     _ => {}
                 }
