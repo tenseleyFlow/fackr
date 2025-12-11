@@ -3606,7 +3606,18 @@ impl Editor {
         let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
         // Vertical scrolling (2 rows reserved: gap + status bar, plus top_offset for tab bar)
         let visible_rows = (self.screen.rows as usize).saturating_sub(2 + top_offset);
-        let cursor_line = self.cursor().line;
+
+        // In multi-cursor mode, scroll to the LAST cursor (most recently added)
+        // This ensures Ctrl+D shows the newly found occurrence
+        let cursors = self.cursors();
+        let target_cursor = if cursors.len() > 1 {
+            cursors.all().last().unwrap()
+        } else {
+            cursors.primary()
+        };
+        let cursor_line = target_cursor.line;
+        let cursor_col = target_cursor.col;
+
         let viewport_line = self.viewport_line();
 
         if cursor_line < viewport_line {
@@ -3629,7 +3640,6 @@ impl Editor {
             .saturating_sub(fuss_width as usize)
             .saturating_sub(line_num_width + 1);
 
-        let cursor_col = self.cursor().col;
         let viewport_col = self.viewport_col();
 
         // Keep some margin (3 chars) so cursor isn't right at the edge
