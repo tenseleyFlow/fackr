@@ -31,7 +31,6 @@ jobs:
         $version = (Get-Content Cargo.toml | Select-String 'version = "(.+)"' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1)
         New-Item -ItemType Directory -Force -Path release
         Copy-Item target/release/fackr.exe release/
-        Copy-Item target/release/fac.exe release/ -ErrorAction SilentlyContinue
         Compress-Archive -Path release/* -DestinationPath "fackr-$version-windows-x86_64.zip"
 
     - name: Upload artifact
@@ -68,7 +67,6 @@ jobs:
         VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
         mkdir -p release
         cp target/release/fackr release/
-        cp target/release/fac release/
         cd release
         tar -czvf ../fackr-${VERSION}-linux-x86_64.tar.gz *
 
@@ -107,7 +105,6 @@ jobs:
         ARCH=$(uname -m)
         mkdir -p release
         cp target/release/fackr release/
-        cp target/release/fac release/
         cd release
         tar -czvf ../fackr-${VERSION}-macos-${ARCH}.tar.gz *
 

@@ -1,5 +1,5 @@
 Name:           fackr
-Version:        0.9.6
+Version:        0.9.7
 Release:        1%{?dist}
 Summary:        Terminal text editor written in Rust
 
@@ -37,18 +37,17 @@ cargo build --release
 mkdir -p %{buildroot}%{_bindir}
 install -Dm755 target/release/fackr %{buildroot}%{_bindir}/fackr
 
-# Create symlink for fac command
-ln -s fackr %{buildroot}%{_bindir}/fac
-
 # Install documentation
 mkdir -p %{buildroot}%{_docdir}/%{name}
 install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md 2>/dev/null || true
 
 %files
 %{_bindir}/fackr
-%{_bindir}/fac
 
 %changelog
+* Wed Dec 11 2024 mfw <espadon@outlook.com> - 0.9.7-1
+- Fix shift-key handling on kitty protocol terminals
+
 * Wed Dec 11 2024 mfw <espadon@outlook.com> - 0.9.6-1
 - Fix command palette char input
 - Create new file from CLI
