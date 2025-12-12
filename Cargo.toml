@@ -1,6 +1,6 @@
 [package]
 name = "fackr"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2021"
 description = "Terminal text editor"
 authors = ["Matthew Forrester Wolffe"]
