@@ -186,6 +186,10 @@ const ALL_KEYBINDS: &[HelpKeybind] = &[
     HelpKeybind::new("Ctrl+W", "Delete word backward", "Edit"),
     HelpKeybind::new("Alt+D", "Delete word forward", "Edit"),
     HelpKeybind::new("Alt+Backspace", "Delete word backward", "Edit"),
+    HelpKeybind::new("Ctrl+K", "Kill to end of line", "Edit"),
+    HelpKeybind::new("Ctrl+U", "Kill to start of line", "Edit"),
+    HelpKeybind::new("Ctrl+Y", "Yank (paste from kill ring)", "Edit"),
+    HelpKeybind::new("Alt+Y", "Cycle yank stack", "Edit"),
 
     // Line Operations
     HelpKeybind::new("Alt+Up", "Move line up", "Lines"),
@@ -464,6 +468,12 @@ pub struct Editor {
     search_state: SearchState,
     /// Cached bracket match for rendering
     bracket_cache: BracketMatchCache,
+    /// Yank stack (kill ring) - separate from system clipboard
+    yank_stack: Vec<String>,
+    /// Current index in yank stack when cycling with Alt+Y
+    yank_index: Option<usize>,
+    /// Length of last yank (for replacing when cycling)
+    last_yank_len: usize,
 }
 
 impl Editor {
@@ -509,6 +519,9 @@ impl Editor {
             server_manager: ServerManagerPanel::new(),
             search_state: SearchState::default(),
             bracket_cache: BracketMatchCache::default(),
+            yank_stack: Vec::with_capacity(32),
+            yank_index: None,
+            last_yank_len: 0,
         };
 
         // If there are backups, show restore prompt
@@ -2051,6 +2064,16 @@ impl Editor {
             // Delete word forward: Alt+D
             (Key::Char('d'), Modifiers { alt: true, .. }) => self.delete_word_forward(),
 
+            // Unix-style kill commands
+            // Kill to end of line: Ctrl+K
+            (Key::Char('k'), Modifiers { ctrl: true, .. }) => self.kill_to_end_of_line(),
+            // Kill to start of line: Ctrl+U
+            (Key::Char('u'), Modifiers { ctrl: true, .. }) => self.kill_to_start_of_line(),
+            // Yank from kill ring: Ctrl+Y
+            (Key::Char('y'), Modifiers { ctrl: true, .. }) => self.yank(),
+            // Cycle yank stack: Alt+Y
+            (Key::Char('y'), Modifiers { alt: true, .. }) => self.yank_cycle(),
+
             // Character transpose: Ctrl+T
             (Key::Char('t'), Modifiers { ctrl: true, .. }) => self.transpose_chars(),
 
@@ -3290,6 +3313,7 @@ impl Editor {
             let deleted: String = self.buffer().slice(start_idx, end_idx).chars().collect();
 
             self.buffer_mut().delete(start_idx, end_idx);
+            self.yank_push(deleted.clone());
             let cursor_after = self.cursor_pos();
             self.history_mut().record_delete(start_idx, deleted, cursor_before, cursor_after);
             self.history_mut().maybe_break_group();
@@ -3386,12 +3410,206 @@ impl Editor {
         if end_idx > start_idx {
             let deleted: String = self.buffer().slice(start_idx, end_idx).chars().collect();
             self.buffer_mut().delete(start_idx, end_idx);
+            self.yank_push(deleted.clone());
             self.cursor_mut().line = start_line;
             self.cursor_mut().col = start_col;
             let cursor_after = self.cursor_pos();
             self.history_mut().record_delete(start_idx, deleted, cursor_before, cursor_after);
             self.history_mut().maybe_break_group();
         }
+    }
+
+    /// Push text onto the yank stack (kill ring)
+    fn yank_push(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        // Limit stack size to 32 entries
+        const MAX_YANK_STACK: usize = 32;
+        if self.yank_stack.len() >= MAX_YANK_STACK {
+            self.yank_stack.remove(0);
+        }
+        self.yank_stack.push(text);
+        // Reset cycling state
+        self.yank_index = None;
+    }
+
+    /// Yank (paste) from yank stack (Ctrl+Y)
+    fn yank(&mut self) {
+        if self.yank_stack.is_empty() {
+            self.message = Some("Yank stack empty".to_string());
+            return;
+        }
+
+        // Delete selection first if any
+        self.delete_selection();
+
+        // Get the most recent entry
+        let text = self.yank_stack.last().unwrap().clone();
+        let cursor_before = self.cursor_pos();
+
+        // Insert the text
+        let idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
+        self.buffer_mut().insert(idx, &text);
+
+        // Move cursor to end of inserted text
+        let text_len = text.chars().count();
+        self.last_yank_len = text_len;
+
+        // Update cursor position
+        for ch in text.chars() {
+            if ch == '\n' {
+                self.cursor_mut().line += 1;
+                self.cursor_mut().col = 0;
+            } else {
+                self.cursor_mut().col += 1;
+            }
+        }
+        self.cursor_mut().desired_col = self.cursor().col;
+
+        let cursor_after = self.cursor_pos();
+        self.history_mut().record_insert(idx, text, cursor_before, cursor_after);
+
+        // Set yank index for cycling
+        self.yank_index = Some(self.yank_stack.len() - 1);
+    }
+
+    /// Cycle through yank stack (Alt+Y) - must be used after Ctrl+Y
+    fn yank_cycle(&mut self) {
+        // Only works if we just yanked
+        let current_idx = match self.yank_index {
+            Some(idx) => idx,
+            None => {
+                self.message = Some("No active yank to cycle".to_string());
+                return;
+            }
+        };
+
+        if self.yank_stack.len() <= 1 {
+            self.message = Some("Only one item in yank stack".to_string());
+            return;
+        }
+
+        // Calculate previous index (cycle backwards through stack)
+        let new_idx = if current_idx == 0 {
+            self.yank_stack.len() - 1
+        } else {
+            current_idx - 1
+        };
+
+        // Delete the previously yanked text
+        let cursor_before = self.cursor_pos();
+        let end_idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
+        let start_idx = end_idx.saturating_sub(self.last_yank_len);
+
+        if start_idx < end_idx {
+            let deleted: String = self.buffer().slice(start_idx, end_idx).chars().collect();
+            self.buffer_mut().delete(start_idx, end_idx);
+
+            // Move cursor back
+            let (line, col) = self.buffer().char_to_line_col(start_idx);
+            self.cursor_mut().line = line;
+            self.cursor_mut().col = col;
+            self.cursor_mut().desired_col = self.cursor().col;
+        }
+
+        // Insert the new text from yank stack
+        let text = self.yank_stack[new_idx].clone();
+        let idx = self.buffer().line_col_to_char(self.cursor().line, self.cursor().col);
+        self.buffer_mut().insert(idx, &text);
+
+        // Move cursor to end of inserted text
+        let text_len = text.chars().count();
+        self.last_yank_len = text_len;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                self.cursor_mut().line += 1;
+                self.cursor_mut().col = 0;
+            } else {
+                self.cursor_mut().col += 1;
+            }
+        }
+        self.cursor_mut().desired_col = self.cursor().col;
+
+        let cursor_after = self.cursor_pos();
+        self.history_mut().record_insert(idx, text, cursor_before, cursor_after);
+
+        // Update yank index
+        self.yank_index = Some(new_idx);
+    }
+
+    /// Kill (delete) from cursor to end of line (Ctrl+K)
+    fn kill_to_end_of_line(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+
+        let line = self.cursor().line;
+        let col = self.cursor().col;
+        let line_len = self.buffer().line_len(line);
+
+        if col >= line_len {
+            // At end of line - delete the newline to join with next line
+            if line < self.buffer().line_count().saturating_sub(1) {
+                let cursor_before = self.cursor_pos();
+                let idx = self.buffer().line_col_to_char(line, col);
+                self.buffer_mut().delete(idx, idx + 1);
+                self.yank_push("\n".to_string());
+                let cursor_after = self.cursor_pos();
+                self.history_mut().record_delete(idx, "\n".to_string(), cursor_before, cursor_after);
+            }
+        } else {
+            // Delete from cursor to end of line
+            let cursor_before = self.cursor_pos();
+            let start_idx = self.buffer().line_col_to_char(line, col);
+            let end_idx = self.buffer().line_col_to_char(line, line_len);
+            let deleted: String = self.buffer().slice(start_idx, end_idx).chars().collect();
+            self.buffer_mut().delete(start_idx, end_idx);
+            self.yank_push(deleted.clone());
+            let cursor_after = self.cursor_pos();
+            self.history_mut().record_delete(start_idx, deleted, cursor_before, cursor_after);
+        }
+        self.history_mut().maybe_break_group();
+    }
+
+    /// Kill (delete) from cursor to start of line (Ctrl+U)
+    fn kill_to_start_of_line(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+
+        let line = self.cursor().line;
+        let col = self.cursor().col;
+
+        if col == 0 {
+            // At start of line - delete the newline before to join with previous line
+            if line > 0 {
+                let cursor_before = self.cursor_pos();
+                let idx = self.buffer().line_col_to_char(line, 0);
+                self.buffer_mut().delete(idx - 1, idx);
+                self.yank_push("\n".to_string());
+                // Move cursor to end of previous line
+                self.cursor_mut().line = line - 1;
+                self.cursor_mut().col = self.buffer().line_len(line - 1);
+                self.cursor_mut().desired_col = self.cursor().col;
+                let cursor_after = self.cursor_pos();
+                self.history_mut().record_delete(idx - 1, "\n".to_string(), cursor_before, cursor_after);
+            }
+        } else {
+            // Delete from start of line to cursor
+            let cursor_before = self.cursor_pos();
+            let start_idx = self.buffer().line_col_to_char(line, 0);
+            let end_idx = self.buffer().line_col_to_char(line, col);
+            let deleted: String = self.buffer().slice(start_idx, end_idx).chars().collect();
+            self.buffer_mut().delete(start_idx, end_idx);
+            self.yank_push(deleted.clone());
+            self.cursor_mut().col = 0;
+            self.cursor_mut().desired_col = 0;
+            let cursor_after = self.cursor_pos();
+            self.history_mut().record_delete(start_idx, deleted, cursor_before, cursor_after);
+        }
+        self.history_mut().maybe_break_group();
     }
 
     fn transpose_chars(&mut self) {
