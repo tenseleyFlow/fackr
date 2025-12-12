@@ -827,13 +827,13 @@ impl Screen {
         };
         let left = format!(" {}{}{}", name, modified, cursor_count);
 
-        // Right side: position (and message if any)
+        // Right side: help hint, position, and message if any
         let primary = cursors.primary();
         let pos = format!("Ln {}, Col {}", primary.line + 1, primary.col + 1);
         let right = if let Some(msg) = message {
-            format!(" {} | {} ", msg, pos)
+            format!(" {} | Shift+F1: Help | {} ", msg, pos)
         } else {
-            format!(" {} ", pos)
+            format!(" Shift+F1: Help | {} ", pos)
         };
 
         // Pad middle
@@ -1427,9 +1427,9 @@ impl Screen {
         let primary = cursors.primary();
         let pos = format!("Ln {}, Col {}", primary.line + 1, primary.col + 1);
         let right = if let Some(msg) = message {
-            format!(" {} | {} ", msg, pos)
+            format!(" {} | Shift+F1: Help | {} ", msg, pos)
         } else {
-            format!(" {} ", pos)
+            format!(" Shift+F1: Help | {} ", pos)
         };
 
         let padding = available_cols.saturating_sub(left.len() + right.len());
@@ -2759,9 +2759,9 @@ impl Screen {
             ResetColor,
         )?;
 
-        // Draw search input row
+        // Draw search input row: "│ " + " {query}" + " │" = 2 + 1 + width + 2 = modal_width
         let display_query = if query.is_empty() { "Type to filter..." } else { query };
-        let input_display_width = modal_width.saturating_sub(6);
+        let input_display_width = modal_width.saturating_sub(5);
         let placeholder_color = if query.is_empty() { Color::AnsiValue(243) } else { Color::White };
         execute!(
             self.stdout,
@@ -2800,9 +2800,6 @@ impl Screen {
             scroll_offset
         };
 
-        // Track current category for headers
-        let mut last_category = String::new();
-
         // Draw keybindings
         let mut row_offset = 0;
         for (idx, (shortcut, description, category)) in keybinds.iter().enumerate().skip(scroll) {
@@ -2812,17 +2809,13 @@ impl Screen {
 
             let row = (start_row + 3 + row_offset) as u16;
             let is_selected = idx == selected_index;
-
-            // Check if we're starting a new category (only when not filtering)
-            if query.is_empty() && category != &last_category {
-                last_category = category.clone();
-            }
-
             let item_bg = if is_selected { selected_bg } else { bg };
 
-            // Format: Shortcut (fixed width)   Description
-            let shortcut_width = 20;
-            let desc_width = modal_width.saturating_sub(shortcut_width + 8);
+            // Format: "│ " + shortcut + " " + description + " " + category + " │"
+            // Widths: 2 + 16 + 1 + desc + 1 + 10 + 2 = 32 + desc = modal_width
+            let shortcut_width = 16;
+            let category_width = 10;
+            let desc_width = modal_width.saturating_sub(shortcut_width + category_width + 6);
 
             // Truncate description if needed
             let display_desc = if description.len() > desc_width {
@@ -2852,7 +2845,7 @@ impl Screen {
                 SetForegroundColor(desc_color),
                 Print(format!(" {:<width$}", display_desc, width = desc_width)),
                 SetForegroundColor(category_color),
-                Print(format!(" {:>6}", if row_offset == 0 || query.is_empty() && keybinds.get(idx.wrapping_sub(1)).map(|(_, _, c)| c != category).unwrap_or(true) { category.as_str() } else { "" })),
+                Print(format!(" {:>width$}", category, width = category_width)),
                 SetForegroundColor(border_color),
                 Print(" │"),
                 ResetColor,
