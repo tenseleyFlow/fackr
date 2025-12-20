@@ -3734,17 +3734,18 @@ impl Screen {
     }
 
     /// Render the integrated terminal panel
-    pub fn render_terminal(&mut self, terminal: &TerminalPanel) -> Result<()> {
+    pub fn render_terminal(&mut self, terminal: &TerminalPanel, left_offset: u16) -> Result<()> {
         // Hide cursor during render to prevent flicker
         execute!(self.stdout, Hide)?;
 
         let start_row = terminal.render_start_row(self.rows);
         let height = terminal.height;
+        let terminal_width = self.cols.saturating_sub(left_offset) as usize;
 
         // Draw terminal border (top line with title)
         execute!(
             self.stdout,
-            MoveTo(0, start_row),
+            MoveTo(left_offset, start_row),
             SetBackgroundColor(Color::AnsiValue(237)),
             SetForegroundColor(Color::White),
         )?;
@@ -3759,7 +3760,7 @@ impl Screen {
                 .map(|p| extract_dirname(p))
                 .unwrap_or_else(|| "Terminal".to_string());
             let title = format!(" {} ", name);
-            let separator = "─".repeat((self.cols as usize).saturating_sub(title.len() + 2) / 2);
+            let separator = "─".repeat(terminal_width.saturating_sub(title.len() + 2) / 2);
             execute!(
                 self.stdout,
                 Print(&separator),
@@ -3773,13 +3774,13 @@ impl Screen {
 
             // Pad to end of line
             let printed = separator.chars().count() * 2 + title.len();
-            if printed < self.cols as usize {
-                execute!(self.stdout, Print(" ".repeat(self.cols as usize - printed)))?;
+            if printed < terminal_width {
+                execute!(self.stdout, Print(" ".repeat(terminal_width - printed)))?;
             }
         } else {
             // Multiple sessions: render tab bar
             let sessions = terminal.sessions();
-            let available_width = self.cols as usize;
+            let available_width = terminal_width;
             let tab_width = (available_width / session_count).max(8).min(25);
 
             let mut printed = 0;
@@ -3872,7 +3873,7 @@ impl Screen {
         )?;
 
         for row in 0..(height - 1) {
-            execute!(self.stdout, MoveTo(0, start_row + 1 + row))?;
+            execute!(self.stdout, MoveTo(left_offset, start_row + 1 + row))?;
 
             // Build a string of characters with same attributes to batch print
             let mut batch = String::new();
@@ -3881,7 +3882,7 @@ impl Screen {
             let mut batch_bold = current_bold;
             let mut batch_underline = current_underline;
 
-            for col in 0..self.cols as usize {
+            for col in 0..terminal_width {
                 let (c, fg, bg, bold, underline) = if let Some(cell) = terminal.get_cell(row as usize, col) {
                     let (fg, bg) = if cell.inverse {
                         let fg = TerminalPanel::to_crossterm_color(&cell.bg);
@@ -3973,10 +3974,10 @@ impl Screen {
             }
         }
 
-        // Position cursor in terminal
+        // Position cursor in terminal (offset by left_offset)
         execute!(
             self.stdout,
-            MoveTo(cursor_col, start_row + 1 + cursor_row),
+            MoveTo(left_offset + cursor_col, start_row + 1 + cursor_row),
             Show,
             ResetColor
         )?;

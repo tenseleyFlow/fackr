@@ -1840,7 +1840,7 @@ impl Editor {
 
             // Render terminal panel if visible (overlays editor content)
             if self.terminal.visible {
-                self.screen.render_terminal(&self.terminal)?;
+                self.screen.render_terminal(&self.terminal, fuss_width)?;
             }
 
             // Render rename modal if active
