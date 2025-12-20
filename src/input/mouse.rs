@@ -37,6 +37,8 @@ pub enum Mouse {
     Click { button: Button, col: u16, row: u16, modifiers: MouseModifiers },
     /// Drag to (column, row)
     Drag { button: Button, col: u16, row: u16, modifiers: MouseModifiers },
+    /// Mouse button released at (column, row)
+    Up { button: Button, col: u16, row: u16 },
     /// Scroll up at (column, row)
     ScrollUp { col: u16, row: u16 },
     /// Scroll down at (column, row)
@@ -66,9 +68,17 @@ impl Mouse {
                 };
                 Some(Mouse::Drag { button, col, row, modifiers })
             }
+            MouseEventKind::Up(button) => {
+                let button = match button {
+                    MouseButton::Left => Button::Left,
+                    MouseButton::Right => Button::Right,
+                    MouseButton::Middle => Button::Middle,
+                };
+                Some(Mouse::Up { button, col, row })
+            }
             MouseEventKind::ScrollUp => Some(Mouse::ScrollUp { col, row }),
             MouseEventKind::ScrollDown => Some(Mouse::ScrollDown { col, row }),
-            _ => None, // Ignore Up, Moved events for now
+            _ => None, // Ignore Moved events for now
         }
     }
 
@@ -77,6 +87,7 @@ impl Mouse {
         match self {
             Mouse::Click { col, .. } => *col,
             Mouse::Drag { col, .. } => *col,
+            Mouse::Up { col, .. } => *col,
             Mouse::ScrollUp { col, .. } => *col,
             Mouse::ScrollDown { col, .. } => *col,
         }
@@ -87,6 +98,7 @@ impl Mouse {
         match self {
             Mouse::Click { row, .. } => *row,
             Mouse::Drag { row, .. } => *row,
+            Mouse::Up { row, .. } => *row,
             Mouse::ScrollUp { row, .. } => *row,
             Mouse::ScrollDown { row, .. } => *row,
         }

@@ -487,6 +487,12 @@ pub struct Editor {
     last_yank_len: usize,
     /// Integrated terminal panel
     terminal: TerminalPanel,
+    /// Terminal resize: dragging in progress
+    terminal_resize_dragging: bool,
+    /// Terminal resize: starting Y position of drag
+    terminal_resize_start_y: u16,
+    /// Terminal resize: starting height when drag began
+    terminal_resize_start_height: u16,
 }
 
 impl Editor {
@@ -539,6 +545,9 @@ impl Editor {
             yank_index: None,
             last_yank_len: 0,
             terminal,
+            terminal_resize_dragging: false,
+            terminal_resize_start_y: 0,
+            terminal_resize_start_height: 0,
         };
 
         // If there are backups, show restore prompt
@@ -1406,6 +1415,7 @@ impl Editor {
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
         {
             let _ = self.terminal.toggle();
+            self.terminal_resize_dragging = false;
             return Ok(());
         }
 
@@ -1414,6 +1424,7 @@ impl Editor {
             // ESC hides terminal
             if key_event.code == KeyCode::Esc {
                 self.terminal.hide();
+                self.terminal_resize_dragging = false;
                 return Ok(());
             }
             // Send all other keys to terminal
@@ -1487,6 +1498,34 @@ impl Editor {
             digits.max(3)
         };
         let text_start_col = left_offset + line_num_width + 1;
+
+        // Handle terminal resize dragging
+        if self.terminal.visible {
+            let title_row = self.screen.rows.saturating_sub(self.terminal.height);
+
+            match mouse {
+                Mouse::Click { button: Button::Left, row, .. } if row == title_row => {
+                    // Start dragging on title bar
+                    self.terminal_resize_dragging = true;
+                    self.terminal_resize_start_y = row;
+                    self.terminal_resize_start_height = self.terminal.height;
+                    return Ok(());
+                }
+                Mouse::Drag { button: Button::Left, row, .. } if self.terminal_resize_dragging => {
+                    // Resize while dragging
+                    let delta = self.terminal_resize_start_y as i32 - row as i32;
+                    let new_height = (self.terminal_resize_start_height as i32 + delta).max(3) as u16;
+                    self.terminal.resize_height(new_height);
+                    return Ok(());
+                }
+                Mouse::Up { button: Button::Left, .. } if self.terminal_resize_dragging => {
+                    // Stop dragging
+                    self.terminal_resize_dragging = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         match mouse {
             Mouse::Click { button: Button::Left, col, row, modifiers } => {
