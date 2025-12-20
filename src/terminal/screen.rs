@@ -96,6 +96,8 @@ pub struct TerminalScreen {
     scroll_bottom: u16,
     /// Response queue for device status reports
     response_queue: Vec<Vec<u8>>,
+    /// Current working directory (from OSC 7)
+    pub cwd: Option<String>,
 }
 
 impl TerminalScreen {
@@ -134,6 +136,8 @@ impl TerminalScreen {
             scroll_bottom: rows.saturating_sub(1),
             // Response queue
             response_queue: Vec::new(),
+            // Current working directory
+            cwd: None,
         }
     }
 
@@ -518,7 +522,26 @@ impl Perform for TerminalScreen {
 
     fn unhook(&mut self) {}
 
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 7: Set working directory
+        // Format: OSC 7 ; file://hostname/path ST
+        if !params.is_empty() {
+            if let Ok(cmd) = std::str::from_utf8(params[0]) {
+                if cmd == "7" && params.len() >= 2 {
+                    if let Ok(url) = std::str::from_utf8(params[1]) {
+                        // Parse file://hostname/path format
+                        if let Some(path) = url.strip_prefix("file://") {
+                            // Find the first slash after hostname
+                            if let Some(slash_idx) = path.find('/') {
+                                let dir = &path[slash_idx..];
+                                self.cwd = Some(dir.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let params: Vec<u16> = params.iter().map(|p| p.first().copied().unwrap_or(0) as u16).collect();
