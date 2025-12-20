@@ -538,6 +538,34 @@ impl Tab {
         self.panes.len()
     }
 
+    /// Find which pane contains a screen coordinate
+    /// Returns the pane index, or active_pane if no match found
+    pub fn pane_at_screen_position(&self, col: u16, row: u16, screen_cols: u16, screen_rows: u16, left_offset: u16, top_offset: u16) -> usize {
+        // Available space for panes (excluding fuss width and tab bar)
+        let available_width = screen_cols.saturating_sub(left_offset) as f32;
+        let available_height = screen_rows.saturating_sub(1 + top_offset) as f32; // -1 for status bar
+
+        // Adjust click coordinates for offsets
+        let adj_col = col.saturating_sub(left_offset) as f32;
+        let adj_row = row.saturating_sub(top_offset) as f32;
+
+        // Normalize coordinates to 0.0-1.0 range
+        let norm_x = adj_col / available_width;
+        let norm_y = adj_row / available_height;
+
+        // Find pane containing this normalized position
+        for (i, pane) in self.panes.iter().enumerate() {
+            if norm_x >= pane.bounds.x_start && norm_x < pane.bounds.x_end
+                && norm_y >= pane.bounds.y_start && norm_y < pane.bounds.y_end
+            {
+                return i;
+            }
+        }
+
+        // Default to active pane if no match
+        self.active_pane
+    }
+
     /// Get the path of the primary buffer (for tab display and workspace tracking)
     pub fn path(&self) -> Option<&PathBuf> {
         self.buffers.first().and_then(|b| b.path.as_ref())
@@ -1138,5 +1166,21 @@ impl Workspace {
             buffer.insert(start_char, &edit.new_text);
         }
         // Buffer automatically tracks modifications via content hash
+    }
+
+    /// Find which pane in the active tab contains a screen coordinate
+    /// Returns the pane index
+    pub fn pane_at_position(&self, col: u16, row: u16, screen_cols: u16, screen_rows: u16) -> usize {
+        // Calculate offsets for fuss mode and tab bar
+        let fuss_width = if self.fuss.active {
+            self.fuss.width(screen_cols)
+        } else {
+            0
+        };
+        let top_offset = if self.tabs.len() > 1 { 1u16 } else { 0 };
+
+        self.tabs[self.active_tab].pane_at_screen_position(
+            col, row, screen_cols, screen_rows, fuss_width, top_offset
+        )
     }
 }
