@@ -53,6 +53,8 @@ pub struct BufferEntry {
     saved_hash: Option<u64>,
     /// Length of buffer at last save (sentinel for quick modified check)
     saved_len: Option<usize>,
+    /// Whether current modifications have been backed up (reset on save)
+    pub backed_up: bool,
 }
 
 impl BufferEntry {
@@ -68,6 +70,7 @@ impl BufferEntry {
             is_orphan: false,
             saved_hash,
             saved_len,
+            backed_up: false, // Will backup on first edit
         }
     }
 
@@ -92,6 +95,7 @@ impl BufferEntry {
             is_orphan: true, // Mark as orphan so path isn't prefixed with workspace root
             saved_hash,
             saved_len,
+            backed_up: true, // Content buffers (like diffs) don't need backup
         }
     }
 
@@ -123,6 +127,7 @@ impl BufferEntry {
             is_orphan,
             saved_hash: None, // Not saved yet - will prompt on close
             saved_len: None,
+            backed_up: false, // Will backup on first edit
         }
     }
 
@@ -155,6 +160,7 @@ impl BufferEntry {
             is_orphan,
             saved_hash,
             saved_len,
+            backed_up: false, // Will backup on first edit
         })
     }
 
@@ -188,6 +194,7 @@ impl BufferEntry {
     pub fn mark_saved(&mut self) {
         self.saved_hash = Some(self.buffer.content_hash());
         self.saved_len = Some(self.buffer.len_chars());
+        self.backed_up = false; // Reset - will backup on next edit
     }
 }
 

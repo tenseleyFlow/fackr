@@ -12,8 +12,8 @@ use crate::workspace::{PaneDirection, Tab, Workspace};
 
 use super::{Cursor, Cursors, History, Operation, Position};
 
-/// How often to write backups (debounce interval)
-const BACKUP_INTERVAL_SECS: u64 = 5;
+/// How long to wait after last edit before writing idle backup (seconds)
+const BACKUP_IDLE_SECS: u64 = 30;
 
 /// Which input field is active in find/replace
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -275,6 +275,8 @@ enum PromptState {
     None,
     /// Quit prompt: Save/Discard/Cancel
     QuitConfirm,
+    /// Close buffer prompt: Save/Discard/Cancel
+    CloseBufferConfirm,
     /// Restore prompt: Restore/Discard
     RestoreBackup,
     /// Text input prompt (label, current input buffer)
@@ -466,8 +468,8 @@ pub struct Editor {
     escape_time: u64,
     /// Current prompt state
     prompt: PromptState,
-    /// Last time we wrote backups
-    last_backup: Instant,
+    /// Time of last edit (for idle backup timing), None if no pending backup
+    last_edit_time: Option<Instant>,
     /// LSP-related UI state
     lsp_state: LspState,
     /// LSP server manager panel
@@ -522,7 +524,7 @@ impl Editor {
             message: None,
             escape_time,
             prompt: PromptState::None,
-            last_backup: Instant::now(),
+            last_edit_time: None, // No pending backup initially
             lsp_state: LspState::default(),
             server_manager: ServerManagerPanel::new(),
             search_state: SearchState::default(),
@@ -762,8 +764,8 @@ impl Editor {
                 needs_render = true;
             }
 
-            // Check if it's time to backup modified buffers
-            self.maybe_backup();
+            // Check if it's time for idle backup
+            self.maybe_idle_backup();
 
             // Only render if something changed
             if needs_render {
@@ -776,13 +778,58 @@ impl Editor {
         Ok(())
     }
 
-    /// Write backups if enough time has passed and there are unsaved changes
-    fn maybe_backup(&mut self) {
-        if self.last_backup.elapsed() >= Duration::from_secs(BACKUP_INTERVAL_SECS) {
-            if self.workspace.has_unsaved_changes() {
-                let _ = self.workspace.backup_all_modified();
+    /// Write idle backups if enough time has passed since last edit
+    fn maybe_idle_backup(&mut self) {
+        if let Some(last_edit) = self.last_edit_time {
+            if last_edit.elapsed() >= Duration::from_secs(BACKUP_IDLE_SECS) {
+                if self.workspace.has_unsaved_changes() {
+                    let _ = self.workspace.backup_all_modified();
+                    // Mark all modified buffers as backed up
+                    for tab in &mut self.workspace.tabs {
+                        for buffer_entry in &mut tab.buffers {
+                            if buffer_entry.is_modified() {
+                                buffer_entry.backed_up = true;
+                            }
+                        }
+                    }
+                }
+                self.last_edit_time = None; // Reset until next edit
             }
-            self.last_backup = Instant::now();
+        }
+    }
+
+    /// Called after key handling - triggers backup if buffer was modified
+    fn on_buffer_edit(&mut self) {
+        // Check buffer state
+        let (is_modified, needs_first_backup) = {
+            let buffer_entry = self.buffer_entry_mut();
+            (buffer_entry.is_modified(), !buffer_entry.backed_up && buffer_entry.is_modified())
+        };
+
+        // Update edit time if buffer has unsaved changes (for idle backup)
+        if is_modified {
+            self.last_edit_time = Some(Instant::now());
+        }
+
+        // First edit since save/load - backup immediately
+        if needs_first_backup {
+            let backup_info: Option<(PathBuf, String)> = {
+                let buffer_entry = self.buffer_entry();
+                buffer_entry.path.as_ref().map(|path| {
+                    let full_path = if buffer_entry.is_orphan {
+                        path.clone()
+                    } else {
+                        self.workspace.root.join(path)
+                    };
+                    let content = buffer_entry.buffer.contents();
+                    (full_path, content)
+                })
+            };
+
+            if let Some((full_path, content)) = backup_info {
+                let _ = self.workspace.write_backup(&full_path, &content);
+                self.buffer_entry_mut().backed_up = true;
+            }
         }
     }
 
@@ -2181,6 +2228,9 @@ impl Editor {
 
             _ => {}
         }
+
+        // Check if buffer was edited and needs backup
+        self.on_buffer_edit();
 
         self.scroll_to_cursor();
         Ok(())
@@ -4221,6 +4271,17 @@ impl Editor {
     }
 
     fn close_pane(&mut self) {
+        // Check if current buffer has unsaved changes
+        if self.buffer_entry_mut().is_modified() {
+            self.prompt = PromptState::CloseBufferConfirm;
+            self.message = Some("Unsaved changes. [S]ave / [D]iscard / [C]ancel".to_string());
+            return;
+        }
+        self.close_pane_force();
+    }
+
+    /// Close pane without checking for unsaved changes (used after save/discard)
+    fn close_pane_force(&mut self) {
         if self.workspace.active_tab_mut().close_active_pane() {
             // Last pane was closed - close the tab
             if self.workspace.close_active_tab() {
@@ -4548,6 +4609,41 @@ impl Editor {
                     _ => {
                         // Repeat the prompt
                         self.message = Some("Unsaved changes. [S]ave all / [D]iscard / [C]ancel".to_string());
+                    }
+                }
+            }
+            PromptState::CloseBufferConfirm => {
+                match key {
+                    Key::Char('s') | Key::Char('S') => {
+                        // Save and close
+                        if let Err(e) = self.save() {
+                            self.message = Some(format!("Save failed: {}", e));
+                        } else {
+                            self.prompt = PromptState::None;
+                            self.close_pane_force();
+                        }
+                    }
+                    Key::Char('d') | Key::Char('D') => {
+                        // Discard changes - delete backup for this buffer and close
+                        if let Some(path) = self.buffer_entry().path.clone() {
+                            let full_path = if self.buffer_entry().is_orphan {
+                                path.clone()
+                            } else {
+                                self.workspace.root.join(&path)
+                            };
+                            let _ = self.workspace.delete_backup(&full_path);
+                        }
+                        self.prompt = PromptState::None;
+                        self.close_pane_force();
+                    }
+                    Key::Char('c') | Key::Char('C') | Key::Escape => {
+                        // Cancel - return to editing
+                        self.prompt = PromptState::None;
+                        self.message = None;
+                    }
+                    _ => {
+                        // Repeat the prompt
+                        self.message = Some("Unsaved changes. [S]ave / [D]iscard / [C]ancel".to_string());
                     }
                 }
             }
