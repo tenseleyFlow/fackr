@@ -6,4 +6,5 @@ Cargo.lock
 .DS_Store
 /planning/
 TESTING.md
-**/.fackr/CLAUDE.md
+**/.fackr/
+CLAUDE.md
