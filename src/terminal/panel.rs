@@ -137,11 +137,19 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Poll for and process PTY output. Returns true if data was received.
+    /// Poll for and process PTY output. Returns true if data was received or terminal closed.
     pub fn poll(&mut self) -> bool {
         let mut had_data = false;
 
         if let Some(ref mut pty) = self.pty {
+            // Check if shell has exited
+            if !pty.is_alive() {
+                // Shell exited - close terminal and clean up
+                self.visible = false;
+                self.pty = None;
+                return true; // Trigger render to hide terminal
+            }
+
             if let Some(data) = pty.read() {
                 self.screen.process(&data);
                 had_data = true;
