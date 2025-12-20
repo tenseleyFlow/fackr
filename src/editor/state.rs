@@ -2249,6 +2249,9 @@ impl Editor {
                 let line_len = line_lens.get(new_line).copied().unwrap_or(0);
                 let new_col = cursor.desired_col.min(line_len);
                 cursor.move_to(new_line, new_col, extend_selection);
+            } else {
+                // On first line, move to start of line
+                cursor.move_to(0, 0, extend_selection);
             }
         }
         self.cursors_mut().merge_overlapping();
@@ -2264,6 +2267,10 @@ impl Editor {
                 let line_len = line_lens.get(new_line).copied().unwrap_or(0);
                 let new_col = cursor.desired_col.min(line_len);
                 cursor.move_to(new_line, new_col, extend_selection);
+            } else {
+                // On last line, move to end of line
+                let line_len = line_lens.get(cursor.line).copied().unwrap_or(0);
+                cursor.move_to(cursor.line, line_len, extend_selection);
             }
         }
         self.cursors_mut().merge_overlapping();
