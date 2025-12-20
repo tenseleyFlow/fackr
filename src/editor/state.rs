@@ -8,6 +8,7 @@ use crate::buffer::Buffer;
 use crate::input::{Key, Modifiers, Mouse, Button};
 use crate::lsp::{CompletionItem, Diagnostic, HoverInfo, Location, ServerManagerPanel};
 use crate::render::{PaneBounds as RenderPaneBounds, PaneInfo, Screen, TabInfo};
+use crate::terminal::TerminalPanel;
 use crate::workspace::{PaneDirection, Tab, Workspace};
 
 use super::{Cursor, Cursors, History, Operation, Position};
@@ -361,6 +362,38 @@ enum PromptState {
     },
 }
 
+/// Which UI component currently has keyboard focus
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// Main editor panes
+    Editor,
+    /// Integrated terminal panel
+    Terminal,
+    /// Fuss mode file tree sidebar
+    FussMode,
+    /// LSP server manager panel
+    ServerManager,
+    /// Active prompt/modal (prompts are exclusive by nature)
+    Prompt,
+}
+
+/// Hit test result for determining which region was clicked
+#[derive(Debug, Clone, Copy)]
+enum HitRegion {
+    /// Editor pane (with index for split panes)
+    Editor { pane_index: usize },
+    /// Terminal panel
+    Terminal,
+    /// Fuss mode sidebar
+    FussMode,
+    /// Server manager panel
+    ServerManager,
+    /// Prompt/modal area
+    Prompt,
+    /// Outside any interactive region
+    None,
+}
+
 /// A single result from multi-file search
 #[derive(Debug, Clone, PartialEq)]
 struct FileSearchResult {
@@ -484,6 +517,16 @@ pub struct Editor {
     yank_index: Option<usize>,
     /// Length of last yank (for replacing when cycling)
     last_yank_len: usize,
+    /// Integrated terminal panel
+    terminal: TerminalPanel,
+    /// Terminal resize: dragging in progress
+    terminal_resize_dragging: bool,
+    /// Terminal resize: starting Y position of drag
+    terminal_resize_start_y: u16,
+    /// Terminal resize: starting height when drag began
+    terminal_resize_start_height: u16,
+    /// Current keyboard focus target
+    focus: Focus,
 }
 
 impl Editor {
@@ -515,6 +558,9 @@ impl Editor {
         // Check if there are backups to restore
         let has_backups = workspace.has_backups();
 
+        // Create terminal panel with screen dimensions
+        let terminal = TerminalPanel::new(screen.cols, screen.rows);
+
         let mut editor = Self {
             workspace,
             screen,
@@ -532,6 +578,11 @@ impl Editor {
             yank_stack: Vec::with_capacity(32),
             yank_index: None,
             last_yank_len: 0,
+            terminal,
+            terminal_resize_dragging: false,
+            terminal_resize_start_y: 0,
+            terminal_resize_start_height: 0,
+            focus: Focus::Editor,
         };
 
         // If there are backups, show restore prompt
@@ -735,6 +786,7 @@ impl Editor {
                     Event::Resize(cols, rows) => {
                         self.screen.cols = cols;
                         self.screen.rows = rows;
+                        self.terminal.update_screen_size(cols, rows);
                     }
                     _ => {}
                 }
@@ -748,10 +800,16 @@ impl Editor {
                         Event::Resize(cols, rows) => {
                             self.screen.cols = cols;
                             self.screen.rows = rows;
+                            self.terminal.update_screen_size(cols, rows);
                         }
                         _ => {}
                     }
                 }
+            }
+
+            // Poll terminal for output (only render if data received)
+            if self.terminal.visible && self.terminal.poll() {
+                needs_render = true;
             }
 
             // Process LSP messages from language servers
@@ -1166,8 +1224,10 @@ impl Editor {
     fn toggle_server_manager(&mut self) {
         if self.server_manager.visible {
             self.server_manager.hide();
+            self.return_focus();
         } else {
             self.server_manager.show();
+            self.focus = Focus::ServerManager;
         }
     }
 
@@ -1178,6 +1238,7 @@ impl Editor {
         // Alt+M toggles the panel closed
         if key == Key::Char('m') && mods.alt {
             self.server_manager.hide();
+            self.return_focus();
             return Ok(());
         }
 
@@ -1384,7 +1445,84 @@ impl Editor {
 
     /// Process a key event, handling ESC as potential Alt prefix
     fn process_key(&mut self, key_event: KeyEvent) -> Result<()> {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Ctrl+` or Ctrl+j toggles terminal (works in both editor and terminal mode)
+        // Ctrl+j is alternate since Ctrl+` can conflict with tmux
+        if (key_event.code == KeyCode::Char('`') || key_event.code == KeyCode::Char('j'))
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            let _ = self.terminal.toggle();
+            self.terminal_resize_dragging = false;
+            // Set focus when opening, return focus when closing
+            if self.terminal.visible {
+                self.focus = Focus::Terminal;
+            } else {
+                self.return_focus();
+            }
+            return Ok(());
+        }
+
+        // Focus-based routing for terminal
+        if self.focus == Focus::Terminal && self.terminal.visible {
+            // ESC hides terminal and returns focus
+            if key_event.code == KeyCode::Esc {
+                self.terminal.hide();
+                self.terminal_resize_dragging = false;
+                self.return_focus();
+                return Ok(());
+            }
+
+            // Terminal tab management keybindings (Alt + key)
+            if key_event.modifiers.contains(KeyModifiers::ALT) {
+                match key_event.code {
+                    // Alt+T: New terminal tab
+                    KeyCode::Char('t') => {
+                        let _ = self.terminal.new_session();
+                        return Ok(());
+                    }
+                    // Alt+Q: Close current tab
+                    KeyCode::Char('q') => {
+                        if self.terminal.close_active_session() {
+                            self.terminal.hide();
+                            self.terminal_resize_dragging = false;
+                            self.return_focus();
+                        }
+                        return Ok(());
+                    }
+                    // Alt+.: Next tab
+                    KeyCode::Char('.') => {
+                        self.terminal.next_session();
+                        return Ok(());
+                    }
+                    // Alt+,: Previous tab
+                    KeyCode::Char(',') => {
+                        self.terminal.prev_session();
+                        return Ok(());
+                    }
+                    // Alt+1-9: Switch to specific tab
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let idx = (c as usize) - ('1' as usize);
+                        self.terminal.switch_session(idx);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+
+            // F3 or Ctrl+B toggles fuss mode (works over terminal)
+            if key_event.code == KeyCode::F(3)
+                || (key_event.code == KeyCode::Char('b')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                self.toggle_fuss_mode();
+                return Ok(());
+            }
+
+            // Send all other keys to terminal
+            let _ = self.terminal.send_key(&key_event);
+            return Ok(());
+        }
 
         // Check if this is a bare Escape key (potential Alt prefix)
         if key_event.code == KeyCode::Esc && key_event.modifiers.is_empty() {
@@ -1435,6 +1573,58 @@ impl Editor {
         Ok(())
     }
 
+    /// Hit test to determine which UI region contains a screen coordinate
+    fn hit_test(&self, col: u16, row: u16) -> HitRegion {
+        // Check prompt/modal first (overlays everything)
+        // Prompts take up various areas but for click purposes we consider them focused
+        if self.prompt != PromptState::None {
+            return HitRegion::Prompt;
+        }
+
+        // Check server manager panel (right side overlay)
+        if self.server_manager.visible {
+            let panel_width = 50.min(self.screen.cols / 2);
+            let panel_start_col = self.screen.cols.saturating_sub(panel_width);
+            if col >= panel_start_col {
+                return HitRegion::ServerManager;
+            }
+        }
+
+        // Check terminal (bottom region)
+        if self.terminal.visible {
+            let terminal_start_row = self.terminal.render_start_row(self.screen.rows);
+            if row >= terminal_start_row {
+                // Terminal shrinks when fuss mode is active
+                let fuss_width = if self.workspace.fuss.active {
+                    self.workspace.fuss.width(self.screen.cols)
+                } else {
+                    0
+                };
+                if col >= fuss_width {
+                    return HitRegion::Terminal;
+                }
+            }
+        }
+
+        // Check fuss sidebar (left side)
+        if self.workspace.fuss.active {
+            let fuss_width = self.workspace.fuss.width(self.screen.cols);
+            if col < fuss_width {
+                return HitRegion::FussMode;
+            }
+        }
+
+        // Otherwise it's the editor - determine which pane
+        let pane_index = self.workspace.pane_at_position(col, row, self.screen.cols, self.screen.rows);
+        HitRegion::Editor { pane_index }
+    }
+
+    /// Return focus to a sensible default after closing a component
+    fn return_focus(&mut self) {
+        // Return focus to the most recently visible component, defaulting to editor
+        self.focus = Focus::Editor;
+    }
+
     /// Handle mouse input
     fn handle_mouse(&mut self, mouse: Mouse) -> Result<()> {
         // Calculate offsets for fuss mode and tab bar
@@ -1452,6 +1642,59 @@ impl Editor {
             digits.max(3)
         };
         let text_start_col = left_offset + line_num_width + 1;
+
+        // Click-to-focus: determine which region was clicked and set focus
+        if let Mouse::Click { col, row, .. } = mouse {
+            let region = self.hit_test(col, row);
+            match region {
+                HitRegion::Terminal => {
+                    self.focus = Focus::Terminal;
+                }
+                HitRegion::FussMode => {
+                    self.focus = Focus::FussMode;
+                }
+                HitRegion::Editor { pane_index } => {
+                    self.focus = Focus::Editor;
+                    // Also set the active pane when clicking in editor area
+                    self.workspace.tabs[self.workspace.active_tab].active_pane = pane_index;
+                }
+                HitRegion::ServerManager => {
+                    self.focus = Focus::ServerManager;
+                }
+                HitRegion::Prompt => {
+                    self.focus = Focus::Prompt;
+                }
+                HitRegion::None => {}
+            }
+        }
+
+        // Handle terminal resize dragging
+        if self.terminal.visible {
+            let title_row = self.screen.rows.saturating_sub(self.terminal.height);
+
+            match mouse {
+                Mouse::Click { button: Button::Left, row, .. } if row == title_row => {
+                    // Start dragging on title bar
+                    self.terminal_resize_dragging = true;
+                    self.terminal_resize_start_y = row;
+                    self.terminal_resize_start_height = self.terminal.height;
+                    return Ok(());
+                }
+                Mouse::Drag { button: Button::Left, row, .. } if self.terminal_resize_dragging => {
+                    // Resize while dragging
+                    let delta = self.terminal_resize_start_y as i32 - row as i32;
+                    let new_height = (self.terminal_resize_start_height as i32 + delta).max(3) as u16;
+                    self.terminal.resize_height(new_height);
+                    return Ok(());
+                }
+                Mouse::Up { button: Button::Left, .. } if self.terminal_resize_dragging => {
+                    // Stop dragging
+                    self.terminal_resize_dragging = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
 
         match mouse {
             Mouse::Click { button: Button::Left, col, row, modifiers } => {
@@ -1540,25 +1783,10 @@ impl Editor {
             0
         };
 
-        // Render fuss mode sidebar if active
+        // Update fuss mode viewport (actual rendering happens after terminal)
         if self.workspace.fuss.active {
             let visible_rows = self.screen.rows.saturating_sub(2) as usize;
             self.workspace.fuss.update_viewport(visible_rows);
-
-            if let Some(ref tree) = self.workspace.fuss.tree {
-                let repo_name = self.workspace.repo_name();
-                let branch = self.workspace.git_branch();
-                self.screen.render_fuss(
-                    tree.visible_items(),
-                    self.workspace.fuss.selected,
-                    self.workspace.fuss.scroll,
-                    fuss_width,
-                    self.workspace.fuss.hints_expanded,
-                    &repo_name,
-                    branch.as_deref(),
-                    self.workspace.fuss.git_mode,
-                )?;
-            }
         }
 
         // Build tab info for tab bar
@@ -1716,6 +1944,29 @@ impl Editor {
             // Render server manager panel if visible (on top of everything)
             if self.server_manager.visible {
                 self.screen.render_server_manager_panel(&self.server_manager)?;
+            }
+
+            // Render terminal panel if visible (overlays editor content)
+            if self.terminal.visible {
+                self.screen.render_terminal(&self.terminal, fuss_width)?;
+            }
+
+            // Render fuss mode sidebar if active (after terminal so it paints on top)
+            if self.workspace.fuss.active {
+                if let Some(ref tree) = self.workspace.fuss.tree {
+                    let repo_name = self.workspace.repo_name();
+                    let branch = self.workspace.git_branch();
+                    self.screen.render_fuss(
+                        tree.visible_items(),
+                        self.workspace.fuss.selected,
+                        self.workspace.fuss.scroll,
+                        fuss_width,
+                        self.workspace.fuss.hints_expanded,
+                        &repo_name,
+                        branch.as_deref(),
+                        self.workspace.fuss.git_mode,
+                    )?;
+                }
             }
 
             // Render rename modal if active
@@ -1898,22 +2149,22 @@ impl Editor {
             return self.handle_prompt_key(key);
         }
 
-        // Handle server manager panel when visible
-        if self.server_manager.visible {
+        // Focus-based routing for server manager
+        if self.focus == Focus::ServerManager && self.server_manager.visible {
             return self.handle_server_manager_key(key, mods);
         }
 
         // Clear message on any key
         self.message = None;
 
-        // Toggle fuss mode: Ctrl+B or F3 (works in both modes)
+        // Toggle fuss mode: Ctrl+B or F3 (global shortcut that sets focus)
         if matches!((&key, &mods), (Key::Char('b'), Modifiers { ctrl: true, .. }) | (Key::F(3), _)) {
             self.toggle_fuss_mode();
             return Ok(());
         }
 
-        // Route to fuss mode handler if active
-        if self.workspace.fuss.active {
+        // Focus-based routing for fuss mode
+        if self.focus == Focus::FussMode && self.workspace.fuss.active {
             return self.handle_fuss_key(key, mods);
         }
 
@@ -4331,8 +4582,10 @@ impl Editor {
     fn toggle_fuss_mode(&mut self) {
         if !self.workspace.fuss.active {
             self.workspace.fuss.activate(&self.workspace.root);
+            self.focus = Focus::FussMode;
         } else {
             self.workspace.fuss.deactivate();
+            self.return_focus();
         }
     }
 
@@ -4352,6 +4605,7 @@ impl Editor {
             (Key::Escape, _) | (Key::F(3), _) => {
                 self.workspace.fuss.filter_clear();
                 self.workspace.fuss.deactivate();
+                self.return_focus();
             }
 
             // Navigation

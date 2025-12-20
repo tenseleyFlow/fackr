@@ -17,6 +17,7 @@ use crate::editor::{Cursors, Position};
 use crate::fuss::VisibleItem;
 use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, Location, ServerManagerPanel};
 use crate::syntax::{Highlighter, Token};
+use crate::terminal::TerminalPanel;
 
 // Editor color scheme (256-color palette)
 const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
@@ -69,6 +70,27 @@ const INACTIVE_BG_COLOR: Color = Color::AnsiValue(233);        // Darker than ac
 const INACTIVE_CURRENT_LINE_BG: Color = Color::AnsiValue(234); // Dimmed current line
 const INACTIVE_LINE_NUM_COLOR: Color = Color::AnsiValue(240);  // Dimmed line numbers
 const INACTIVE_TEXT_COLOR: Color = Color::AnsiValue(245);      // Dimmed text
+
+/// Extract the last component of a path for display
+fn extract_dirname(path: &str) -> String {
+    // Handle home directory
+    if path == "/" {
+        return "/".to_string();
+    }
+
+    // Get the last path component
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .map(|s| {
+            // If it starts with ~, keep it
+            if path.starts_with('~') || path == "/" {
+                s.to_string()
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or_else(|| path.to_string())
+}
 
 /// Terminal screen renderer
 pub struct Screen {
@@ -1093,6 +1115,17 @@ impl Screen {
                 )?;
             }
         }
+
+        // Fill the status bar row for fuss mode column (prevents terminal bleed-through)
+        let status_row = self.rows.saturating_sub(1);
+        execute!(self.stdout, MoveTo(0, status_row))?;
+        let status_fill = " ".repeat(width);
+        execute!(
+            self.stdout,
+            SetBackgroundColor(BG_COLOR),
+            Print(&status_fill),
+            ResetColor
+        )?;
 
         Ok(())
     }
@@ -3705,6 +3738,258 @@ impl Screen {
             Print("└"),
             Print("─".repeat(panel_width - 2)),
             Print("┘"),
+            ResetColor
+        )?;
+
+        Ok(())
+    }
+
+    /// Render the integrated terminal panel
+    pub fn render_terminal(&mut self, terminal: &TerminalPanel, left_offset: u16) -> Result<()> {
+        // Hide cursor during render to prevent flicker
+        execute!(self.stdout, Hide)?;
+
+        let start_row = terminal.render_start_row(self.rows);
+        let height = terminal.height;
+        let terminal_width = self.cols.saturating_sub(left_offset) as usize;
+
+        // Draw terminal border (top line with title)
+        execute!(
+            self.stdout,
+            MoveTo(left_offset, start_row),
+            SetBackgroundColor(Color::AnsiValue(237)),
+            SetForegroundColor(Color::White),
+        )?;
+
+        // Terminal title bar with tabs
+        let session_count = terminal.session_count();
+        let active_idx = terminal.active_session_index();
+
+        if session_count <= 1 {
+            // Single session: show CWD or "Terminal" centered
+            let name = terminal.active_cwd()
+                .map(|p| extract_dirname(p))
+                .unwrap_or_else(|| "Terminal".to_string());
+            let title = format!(" {} ", name);
+            let separator = "─".repeat(terminal_width.saturating_sub(title.len() + 2) / 2);
+            execute!(
+                self.stdout,
+                Print(&separator),
+                SetAttribute(Attribute::Bold),
+                Print(&title),
+                SetAttribute(Attribute::Reset),
+                SetBackgroundColor(Color::AnsiValue(237)),
+                SetForegroundColor(Color::White),
+                Print(&separator),
+            )?;
+
+            // Pad to end of line
+            let printed = separator.chars().count() * 2 + title.len();
+            if printed < terminal_width {
+                execute!(self.stdout, Print(" ".repeat(terminal_width - printed)))?;
+            }
+        } else {
+            // Multiple sessions: render tab bar
+            let sessions = terminal.sessions();
+            let available_width = terminal_width;
+            let tab_width = (available_width / session_count).max(8).min(25);
+
+            let mut printed = 0;
+            for (i, session) in sessions.iter().enumerate() {
+                let is_active = i == active_idx;
+                let name = session.cwd()
+                    .map(|p| extract_dirname(p))
+                    .unwrap_or_else(|| format!("Term {}", i + 1));
+
+                // Format: "[n] name" with truncation
+                let prefix = format!("{} ", i + 1);
+                let max_name_len = tab_width.saturating_sub(prefix.len() + 1);
+                let display_name = if name.len() > max_name_len {
+                    format!("{}…", &name[..max_name_len.saturating_sub(1)])
+                } else {
+                    name
+                };
+                let tab_content = format!("{}{}", prefix, display_name);
+
+                // Set colors based on active state
+                if is_active {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(238)),
+                        SetForegroundColor(Color::White),
+                        SetAttribute(Attribute::Bold),
+                    )?;
+                } else {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(235)),
+                        SetForegroundColor(Color::AnsiValue(245)),
+                        SetAttribute(Attribute::Reset),
+                    )?;
+                }
+
+                // Print tab with padding
+                let padding = tab_width.saturating_sub(tab_content.len());
+                let left_pad = padding / 2;
+                let right_pad = padding - left_pad;
+                execute!(
+                    self.stdout,
+                    Print(" ".repeat(left_pad)),
+                    Print(&tab_content),
+                    Print(" ".repeat(right_pad)),
+                )?;
+                printed += tab_width;
+
+                // Separator between tabs
+                if i < session_count - 1 {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(237)),
+                        SetForegroundColor(Color::AnsiValue(240)),
+                        SetAttribute(Attribute::Reset),
+                        Print("│"),
+                    )?;
+                    printed += 1;
+                }
+            }
+
+            // Fill remaining space
+            if printed < available_width {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(Color::AnsiValue(237)),
+                    SetForegroundColor(Color::White),
+                    SetAttribute(Attribute::Reset),
+                    Print(" ".repeat(available_width - printed)),
+                )?;
+            }
+        }
+
+        // Terminal content area - use batched rendering to reduce flicker
+        let (cursor_row, cursor_col) = terminal.cursor_pos();
+        let default_bg = Color::AnsiValue(232);
+        let default_fg = Color::White;
+
+        // Track current colors to avoid redundant escape sequences
+        let mut current_fg = default_fg;
+        let mut current_bg = default_bg;
+        let mut current_bold = false;
+        let mut current_underline = false;
+
+        // Set initial colors
+        execute!(
+            self.stdout,
+            SetBackgroundColor(default_bg),
+            SetForegroundColor(default_fg)
+        )?;
+
+        for row in 0..(height - 1) {
+            execute!(self.stdout, MoveTo(left_offset, start_row + 1 + row))?;
+
+            // Build a string of characters with same attributes to batch print
+            let mut batch = String::new();
+            let mut batch_fg = current_fg;
+            let mut batch_bg = current_bg;
+            let mut batch_bold = current_bold;
+            let mut batch_underline = current_underline;
+
+            for col in 0..terminal_width {
+                let (c, fg, bg, bold, underline) = if let Some(cell) = terminal.get_cell(row as usize, col) {
+                    let (fg, bg) = if cell.inverse {
+                        let fg = TerminalPanel::to_crossterm_color(&cell.bg);
+                        let bg = TerminalPanel::to_crossterm_color(&cell.fg);
+                        (
+                            if fg == Color::Reset { default_bg } else { fg },
+                            if bg == Color::Reset { default_fg } else { bg },
+                        )
+                    } else {
+                        let fg = TerminalPanel::to_crossterm_color(&cell.fg);
+                        let bg = TerminalPanel::to_crossterm_color(&cell.bg);
+                        (
+                            if fg == Color::Reset { default_fg } else { fg },
+                            if bg == Color::Reset { default_bg } else { bg },
+                        )
+                    };
+                    (cell.c, fg, bg, cell.bold, cell.underline)
+                } else {
+                    (' ', default_fg, default_bg, false, false)
+                };
+
+                // Check if attributes changed
+                if fg != batch_fg || bg != batch_bg || bold != batch_bold || underline != batch_underline {
+                    // Flush current batch
+                    if !batch.is_empty() {
+                        // Apply batch attributes if different from current
+                        if batch_fg != current_fg {
+                            execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                            current_fg = batch_fg;
+                        }
+                        if batch_bg != current_bg {
+                            execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                            current_bg = batch_bg;
+                        }
+                        if batch_bold != current_bold {
+                            if batch_bold {
+                                execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                            } else {
+                                execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                            }
+                            current_bold = batch_bold;
+                        }
+                        if batch_underline != current_underline {
+                            if batch_underline {
+                                execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                            } else {
+                                execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                            }
+                            current_underline = batch_underline;
+                        }
+                        execute!(self.stdout, Print(&batch))?;
+                        batch.clear();
+                    }
+                    batch_fg = fg;
+                    batch_bg = bg;
+                    batch_bold = bold;
+                    batch_underline = underline;
+                }
+                batch.push(c);
+            }
+
+            // Flush remaining batch for this row
+            if !batch.is_empty() {
+                if batch_fg != current_fg {
+                    execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                    current_fg = batch_fg;
+                }
+                if batch_bg != current_bg {
+                    execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                    current_bg = batch_bg;
+                }
+                if batch_bold != current_bold {
+                    if batch_bold {
+                        execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                    } else {
+                        execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                    }
+                    current_bold = batch_bold;
+                }
+                if batch_underline != current_underline {
+                    if batch_underline {
+                        execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                    } else {
+                        execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                    }
+                    current_underline = batch_underline;
+                }
+                execute!(self.stdout, Print(&batch))?;
+            }
+        }
+
+        // Position cursor in terminal (offset by left_offset)
+        execute!(
+            self.stdout,
+            MoveTo(left_offset + cursor_col, start_row + 1 + cursor_row),
+            Show,
             ResetColor
         )?;
 

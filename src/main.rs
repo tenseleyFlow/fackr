@@ -5,6 +5,7 @@ mod input;
 mod lsp;
 mod render;
 mod syntax;
+mod terminal;
 mod util;
 mod workspace;
 

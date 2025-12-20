@@ -31,6 +31,10 @@ regex = "1"
 # System directories
 dirs = "5"
 
+# Integrated terminal
+portable-pty = "0.8"
+vte = "0.13"
+
 [[bin]]
 name = "fackr"
 path = "src/main.rs"
