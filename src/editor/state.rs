@@ -1464,6 +1464,15 @@ impl Editor {
                 }
             }
 
+            // F3 or Ctrl+B toggles fuss mode (works over terminal)
+            if key_event.code == KeyCode::F(3)
+                || (key_event.code == KeyCode::Char('b')
+                    && key_event.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                self.workspace.fuss.toggle();
+                return Ok(());
+            }
+
             // Send all other keys to terminal
             let _ = self.terminal.send_key(&key_event);
             return Ok(());
