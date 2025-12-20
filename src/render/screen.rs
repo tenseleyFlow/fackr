@@ -2720,6 +2720,7 @@ impl Screen {
         keybinds: &[(String, String, String)], // (shortcut, description, category)
         selected_index: usize,
         scroll_offset: usize,
+        show_alt: bool,
     ) -> Result<()> {
         let (width, height) = (self.cols as usize, self.rows as usize);
 
@@ -2734,13 +2735,13 @@ impl Screen {
         let border_color = Color::AnsiValue(240);
         let title_color = Color::Cyan;
         let category_color = Color::AnsiValue(243);
-        let shortcut_color = Color::Yellow;
+        let shortcut_color = if show_alt { Color::Magenta } else { Color::Yellow };
         let desc_color = Color::White;
         let selected_bg = Color::AnsiValue(24); // Blue highlight
         let input_bg = Color::AnsiValue(238);
 
-        // Draw top border with title
-        let title = " Keybindings ";
+        // Draw top border with title (show indicator when viewing alternates)
+        let title = if show_alt { " Keybindings [/] " } else { " Keybindings " };
         let title_padding = (modal_width.saturating_sub(title.len() + 2)) / 2;
         execute!(
             self.stdout,
@@ -2899,7 +2900,11 @@ impl Screen {
         )?;
 
         // Show help text below
-        let help_text = "↑↓:scroll  PgUp/PgDn:page  Home/End:jump  Esc:close";
+        let help_text = if show_alt {
+            "↑↓:scroll  PgUp/PgDn:page  Home/End:jump  /:alt binds  Esc:close"
+        } else {
+            "↑↓:scroll  PgUp/PgDn:page  Home/End:jump  /:alt binds  Esc:close"
+        };
         execute!(
             self.stdout,
             MoveTo(start_col as u16, info_row + 2),

@@ -58,17 +58,17 @@ impl PaletteCommand {
 const ALL_COMMANDS: &[PaletteCommand] = &[
     // File operations
     PaletteCommand::new("Save File", "Ctrl+S", "File", "save"),
-    PaletteCommand::new("Save All", "Ctrl+Shift+S", "File", "save-all"),
+    PaletteCommand::new("Save All", "", "File", "save-all"),
     PaletteCommand::new("Open File Browser", "Ctrl+O", "File", "open"),
-    PaletteCommand::new("New Tab", "Ctrl+T", "File", "new-tab"),
-    PaletteCommand::new("Close Tab", "Ctrl+W", "File", "close-tab"),
-    PaletteCommand::new("Next Tab", "Ctrl+Tab", "File", "next-tab"),
-    PaletteCommand::new("Previous Tab", "Ctrl+Shift+Tab", "File", "prev-tab"),
+    PaletteCommand::new("New Tab", "Alt+T", "File", "new-tab"),
+    PaletteCommand::new("Close Tab", "Alt+Q", "File", "close-tab"),
+    PaletteCommand::new("Next Tab", "Alt+.", "File", "next-tab"),
+    PaletteCommand::new("Previous Tab", "Alt+,", "File", "prev-tab"),
     PaletteCommand::new("Quit", "Ctrl+Q", "File", "quit"),
 
     // Edit operations
     PaletteCommand::new("Undo", "Ctrl+Z", "Edit", "undo"),
-    PaletteCommand::new("Redo", "Ctrl+Shift+Z", "Edit", "redo"),
+    PaletteCommand::new("Redo", "Ctrl+]", "Edit", "redo"),
     PaletteCommand::new("Cut", "Ctrl+X", "Edit", "cut"),
     PaletteCommand::new("Copy", "Ctrl+C", "Edit", "copy"),
     PaletteCommand::new("Paste", "Ctrl+V", "Edit", "paste"),
@@ -80,7 +80,7 @@ const ALL_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand::new("Duplicate Line", "Alt+Shift+Down", "Edit", "duplicate-line"),
     PaletteCommand::new("Move Line Up", "Alt+Up", "Edit", "move-line-up"),
     PaletteCommand::new("Move Line Down", "Alt+Down", "Edit", "move-line-down"),
-    PaletteCommand::new("Delete Line", "Ctrl+Shift+K", "Edit", "delete-line"),
+    PaletteCommand::new("Delete Line", "", "Edit", "delete-line"),
     PaletteCommand::new("Indent", "Tab", "Edit", "indent"),
     PaletteCommand::new("Outdent", "Shift+Tab", "Edit", "outdent"),
     PaletteCommand::new("Transpose Characters", "Ctrl+T", "Edit", "transpose"),
@@ -101,16 +101,16 @@ const ALL_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand::new("Page Down", "PageDown", "Navigation", "page-down"),
 
     // Selection
-    PaletteCommand::new("Expand Selection to Brackets", "Ctrl+Shift+M", "Selection", "select-brackets"),
+    PaletteCommand::new("Expand Selection to Brackets", "", "Selection", "select-brackets"),
     PaletteCommand::new("Add Cursor Above", "Ctrl+Alt+Up", "Selection", "cursor-above"),
     PaletteCommand::new("Add Cursor Below", "Ctrl+Alt+Down", "Selection", "cursor-below"),
 
     // View / Panes
-    PaletteCommand::new("Split Pane Vertical", "Ctrl+\\", "View", "split-vertical"),
-    PaletteCommand::new("Split Pane Horizontal", "Ctrl+Shift+\\", "View", "split-horizontal"),
-    PaletteCommand::new("Close Pane", "Ctrl+Shift+W", "View", "close-pane"),
-    PaletteCommand::new("Focus Next Pane", "Ctrl+Alt+Right", "View", "next-pane"),
-    PaletteCommand::new("Focus Previous Pane", "Ctrl+Alt+Left", "View", "prev-pane"),
+    PaletteCommand::new("Split Pane Vertical", "Alt+V", "View", "split-vertical"),
+    PaletteCommand::new("Split Pane Horizontal", "Alt+S", "View", "split-horizontal"),
+    PaletteCommand::new("Close Pane", "Alt+Q", "View", "close-pane"),
+    PaletteCommand::new("Focus Next Pane", "Alt+N", "View", "next-pane"),
+    PaletteCommand::new("Focus Previous Pane", "Alt+P", "View", "prev-pane"),
     PaletteCommand::new("Toggle File Explorer", "Ctrl+B", "View", "toggle-explorer"),
 
     // LSP / Code Intelligence
@@ -136,6 +136,8 @@ const ALL_COMMANDS: &[PaletteCommand] = &[
 struct HelpKeybind {
     /// Keyboard shortcut (e.g., "Ctrl+S")
     shortcut: &'static str,
+    /// Alternative shortcut (shown when "/" is held)
+    alt_shortcut: &'static str,
     /// Description of what the keybind does
     description: &'static str,
     /// Category for grouping
@@ -144,7 +146,11 @@ struct HelpKeybind {
 
 impl HelpKeybind {
     const fn new(shortcut: &'static str, description: &'static str, category: &'static str) -> Self {
-        Self { shortcut, description, category }
+        Self { shortcut, alt_shortcut: "", description, category }
+    }
+
+    const fn with_alt(shortcut: &'static str, alt_shortcut: &'static str, description: &'static str, category: &'static str) -> Self {
+        Self { shortcut, alt_shortcut, description, category }
     }
 }
 
@@ -154,7 +160,7 @@ const ALL_KEYBINDS: &[HelpKeybind] = &[
     HelpKeybind::new("Ctrl+S", "Save file", "File"),
     HelpKeybind::new("Ctrl+O", "Open file browser (Fortress)", "File"),
     HelpKeybind::new("Ctrl+Q", "Quit editor", "File"),
-    HelpKeybind::new("Ctrl+B / F3", "Toggle file explorer", "File"),
+    HelpKeybind::with_alt("Ctrl+B", "F3", "Toggle file explorer", "File"),
 
     // Tabs
     HelpKeybind::new("Alt+T", "New tab", "Tabs"),
@@ -172,7 +178,7 @@ const ALL_KEYBINDS: &[HelpKeybind] = &[
 
     // Editing
     HelpKeybind::new("Ctrl+Z", "Undo", "Edit"),
-    HelpKeybind::new("Ctrl+Shift+Z", "Redo", "Edit"),
+    HelpKeybind::with_alt("Ctrl+]", "Ctrl+Shift+Z", "Redo", "Edit"),
     HelpKeybind::new("Ctrl+C", "Copy", "Edit"),
     HelpKeybind::new("Ctrl+X", "Cut", "Edit"),
     HelpKeybind::new("Ctrl+V", "Paste", "Edit"),
@@ -199,13 +205,13 @@ const ALL_KEYBINDS: &[HelpKeybind] = &[
 
     // Movement
     HelpKeybind::new("Arrow keys", "Move cursor", "Movement"),
-    HelpKeybind::new("Home / Ctrl+A", "Go to line start (smart)", "Movement"),
-    HelpKeybind::new("End / Ctrl+E", "Go to line end", "Movement"),
-    HelpKeybind::new("Alt+Left / Alt+B", "Move word left", "Movement"),
-    HelpKeybind::new("Alt+Right / Alt+F", "Move word right", "Movement"),
+    HelpKeybind::with_alt("Home", "Ctrl+A", "Go to line start (smart)", "Movement"),
+    HelpKeybind::with_alt("End", "Ctrl+E", "Go to line end", "Movement"),
+    HelpKeybind::with_alt("Alt+Left", "Alt+B", "Move word left", "Movement"),
+    HelpKeybind::with_alt("Alt+Right", "Alt+F", "Move word right", "Movement"),
     HelpKeybind::new("PageUp", "Page up", "Movement"),
     HelpKeybind::new("PageDown", "Page down", "Movement"),
-    HelpKeybind::new("Ctrl+G / F5", "Go to line", "Movement"),
+    HelpKeybind::with_alt("Ctrl+G", "F5", "Go to line", "Movement"),
 
     // Selection
     HelpKeybind::new("Shift+Arrow", "Extend selection", "Selection"),
@@ -226,7 +232,7 @@ const ALL_KEYBINDS: &[HelpKeybind] = &[
     HelpKeybind::new("Alt+Enter", "Replace all (in find)", "Search"),
 
     // Brackets & Quotes
-    HelpKeybind::new("Alt+[ / Alt+]", "Jump to matching bracket", "Brackets"),
+    HelpKeybind::with_alt("Alt+[", "Alt+]", "Jump to matching bracket", "Brackets"),
     HelpKeybind::new("Alt+'", "Cycle quote type (\"/'/`)", "Brackets"),
     HelpKeybind::new("Alt+\"", "Remove surrounding quotes", "Brackets"),
     HelpKeybind::new("Alt+(", "Cycle bracket type (/{/[)", "Brackets"),
@@ -348,6 +354,8 @@ enum PromptState {
         selected_index: usize,
         /// Scroll offset for long lists
         scroll_offset: usize,
+        /// Show alternative keybindings (toggled with "/")
+        show_alt: bool,
     },
 }
 
@@ -1746,17 +1754,27 @@ impl Editor {
                 ref filtered,
                 selected_index,
                 scroll_offset,
+                show_alt,
             } = self.prompt {
                 // Convert keybinds to tuple format for render function
+                // Use alt_shortcut when show_alt is true (for entries that have one)
                 let keybinds_tuples: Vec<(String, String, String)> = filtered
                     .iter()
-                    .map(|kb| (kb.shortcut.to_string(), kb.description.to_string(), kb.category.to_string()))
+                    .map(|kb| {
+                        let shortcut = if show_alt && !kb.alt_shortcut.is_empty() {
+                            kb.alt_shortcut.to_string()
+                        } else {
+                            kb.shortcut.to_string()
+                        };
+                        (shortcut, kb.description.to_string(), kb.category.to_string())
+                    })
                     .collect();
                 self.screen.render_help_menu(
                     query,
                     &keybinds_tuples,
                     selected_index,
                     scroll_offset,
+                    show_alt,
                 )?;
                 return Ok(()); // Modal handles cursor
             }
@@ -5003,6 +5021,7 @@ impl Editor {
                 ref mut filtered,
                 ref mut selected_index,
                 ref mut scroll_offset,
+                ref mut show_alt,
             } => {
                 match key {
                     Key::Escape | Key::Enter => {
@@ -5054,6 +5073,10 @@ impl Editor {
                             *selected_index = 0;
                             *scroll_offset = 0;
                         }
+                    }
+                    // Toggle alternate keybindings view
+                    Key::Char('/') => {
+                        *show_alt = !*show_alt;
                     }
                     Key::Char(c) => {
                         query.push(c);
@@ -5938,6 +5961,7 @@ impl Editor {
             filtered,
             selected_index: 0,
             scroll_offset: 0,
+            show_alt: false,
         };
     }
 }
