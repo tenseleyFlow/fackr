@@ -4253,6 +4253,8 @@ impl Editor {
         if let Some(ref p) = path {
             self.buffer_mut().save(p)?;
             self.buffer_entry_mut().mark_saved();
+            // Delete backup after successful save
+            let _ = self.workspace.delete_backup(p);
             self.message = Some("Saved".to_string());
         }
         Ok(())
