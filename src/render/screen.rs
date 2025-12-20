@@ -17,6 +17,7 @@ use crate::editor::{Cursors, Position};
 use crate::fuss::VisibleItem;
 use crate::lsp::{CompletionItem, Diagnostic, DiagnosticSeverity, HoverInfo, Location, ServerManagerPanel};
 use crate::syntax::{Highlighter, Token};
+use crate::terminal::TerminalPanel;
 
 // Editor color scheme (256-color palette)
 const BG_COLOR: Color = Color::AnsiValue(234);           // Off-black editor background
@@ -3705,6 +3706,98 @@ impl Screen {
             Print("└"),
             Print("─".repeat(panel_width - 2)),
             Print("┘"),
+            ResetColor
+        )?;
+
+        Ok(())
+    }
+
+    /// Render the integrated terminal panel
+    pub fn render_terminal(&mut self, terminal: &TerminalPanel) -> Result<()> {
+        let start_row = terminal.render_start_row(self.rows);
+        let height = terminal.height;
+
+        // Draw terminal border (top line with title)
+        execute!(
+            self.stdout,
+            MoveTo(0, start_row),
+            SetBackgroundColor(Color::AnsiValue(237)),
+            SetForegroundColor(Color::White),
+        )?;
+
+        // Terminal title bar
+        let title = " Terminal ";
+        let separator = "─".repeat((self.cols as usize).saturating_sub(title.len() + 2) / 2);
+        execute!(
+            self.stdout,
+            Print(&separator),
+            SetAttribute(Attribute::Bold),
+            Print(title),
+            SetAttribute(Attribute::Reset),
+            SetBackgroundColor(Color::AnsiValue(237)),
+            SetForegroundColor(Color::White),
+            Print(&separator),
+        )?;
+
+        // Pad to end of line
+        let printed = separator.chars().count() * 2 + title.len();
+        if printed < self.cols as usize {
+            execute!(self.stdout, Print(" ".repeat(self.cols as usize - printed)))?;
+        }
+
+        // Terminal content area (dark background)
+        execute!(self.stdout, SetBackgroundColor(Color::AnsiValue(232)))?;
+
+        let (cursor_row, cursor_col) = terminal.cursor_pos();
+
+        for row in 0..(height - 1) {
+            execute!(self.stdout, MoveTo(0, start_row + 1 + row))?;
+
+            // Render cells from terminal screen
+            for col in 0..self.cols as usize {
+                if let Some(cell) = terminal.get_cell(row as usize, col) {
+                    // Set colors
+                    let fg = TerminalPanel::to_crossterm_color(&cell.fg);
+                    let bg = TerminalPanel::to_crossterm_color(&cell.bg);
+
+                    if cell.inverse {
+                        execute!(
+                            self.stdout,
+                            SetForegroundColor(if bg == Color::Reset { Color::AnsiValue(232) } else { bg }),
+                            SetBackgroundColor(if fg == Color::Reset { Color::White } else { fg }),
+                        )?;
+                    } else {
+                        execute!(
+                            self.stdout,
+                            SetForegroundColor(if fg == Color::Reset { Color::White } else { fg }),
+                            SetBackgroundColor(if bg == Color::Reset { Color::AnsiValue(232) } else { bg }),
+                        )?;
+                    }
+
+                    if cell.bold {
+                        execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                    }
+                    if cell.underline {
+                        execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                    }
+
+                    execute!(self.stdout, Print(cell.c))?;
+
+                    if cell.bold || cell.underline {
+                        execute!(self.stdout, SetAttribute(Attribute::Reset))?;
+                        execute!(self.stdout, SetBackgroundColor(Color::AnsiValue(232)))?;
+                    }
+                } else {
+                    execute!(self.stdout, Print(' '))?;
+                }
+            }
+        }
+
+        // Position cursor in terminal
+        execute!(
+            self.stdout,
+            MoveTo(cursor_col, start_row + 1 + cursor_row),
+            Show,
             ResetColor
         )?;
 

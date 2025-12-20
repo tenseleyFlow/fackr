@@ -8,6 +8,7 @@ use crate::buffer::Buffer;
 use crate::input::{Key, Modifiers, Mouse, Button};
 use crate::lsp::{CompletionItem, Diagnostic, HoverInfo, Location, ServerManagerPanel};
 use crate::render::{PaneBounds as RenderPaneBounds, PaneInfo, Screen, TabInfo};
+use crate::terminal::TerminalPanel;
 use crate::workspace::{PaneDirection, Tab, Workspace};
 
 use super::{Cursor, Cursors, History, Operation, Position};
@@ -484,6 +485,8 @@ pub struct Editor {
     yank_index: Option<usize>,
     /// Length of last yank (for replacing when cycling)
     last_yank_len: usize,
+    /// Integrated terminal panel
+    terminal: TerminalPanel,
 }
 
 impl Editor {
@@ -515,6 +518,9 @@ impl Editor {
         // Check if there are backups to restore
         let has_backups = workspace.has_backups();
 
+        // Create terminal panel with screen dimensions
+        let terminal = TerminalPanel::new(screen.cols, screen.rows);
+
         let mut editor = Self {
             workspace,
             screen,
@@ -532,6 +538,7 @@ impl Editor {
             yank_stack: Vec::with_capacity(32),
             yank_index: None,
             last_yank_len: 0,
+            terminal,
         };
 
         // If there are backups, show restore prompt
@@ -735,6 +742,7 @@ impl Editor {
                     Event::Resize(cols, rows) => {
                         self.screen.cols = cols;
                         self.screen.rows = rows;
+                        self.terminal.update_screen_size(cols, rows);
                     }
                     _ => {}
                 }
@@ -748,10 +756,17 @@ impl Editor {
                         Event::Resize(cols, rows) => {
                             self.screen.cols = cols;
                             self.screen.rows = rows;
+                            self.terminal.update_screen_size(cols, rows);
                         }
                         _ => {}
                     }
                 }
+            }
+
+            // Poll terminal for output
+            if self.terminal.visible {
+                self.terminal.poll();
+                needs_render = true; // Terminal might have new output
             }
 
             // Process LSP messages from language servers
@@ -1384,7 +1399,26 @@ impl Editor {
 
     /// Process a key event, handling ESC as potential Alt prefix
     fn process_key(&mut self, key_event: KeyEvent) -> Result<()> {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Ctrl+` toggles terminal (works in both editor and terminal mode)
+        // Backtick is ` (grave accent)
+        if key_event.code == KeyCode::Char('`') && key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            let _ = self.terminal.toggle();
+            return Ok(());
+        }
+
+        // If terminal is visible, route input to terminal
+        if self.terminal.visible {
+            // ESC hides terminal
+            if key_event.code == KeyCode::Esc {
+                self.terminal.hide();
+                return Ok(());
+            }
+            // Send all other keys to terminal
+            let _ = self.terminal.send_key(&key_event);
+            return Ok(());
+        }
 
         // Check if this is a bare Escape key (potential Alt prefix)
         if key_event.code == KeyCode::Esc && key_event.modifiers.is_empty() {
@@ -1716,6 +1750,11 @@ impl Editor {
             // Render server manager panel if visible (on top of everything)
             if self.server_manager.visible {
                 self.screen.render_server_manager_panel(&self.server_manager)?;
+            }
+
+            // Render terminal panel if visible (overlays editor content)
+            if self.terminal.visible {
+                self.screen.render_terminal(&self.terminal)?;
             }
 
             // Render rename modal if active
