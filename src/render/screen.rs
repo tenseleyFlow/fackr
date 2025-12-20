@@ -893,12 +893,9 @@ impl Screen {
         repo_name: &str,
         branch: Option<&str>,
         git_mode: bool,
-        max_rows: Option<u16>,
     ) -> Result<()> {
         let width = width as usize;
-        // Use max_rows if provided (e.g., when terminal is visible), otherwise use full height
-        let available_rows = max_rows.unwrap_or(self.rows);
-        let text_rows = available_rows.saturating_sub(1) as usize;
+        let text_rows = self.rows.saturating_sub(1) as usize;
         let hint_rows = if hints_expanded { 4 } else { 1 };
         // Header line + separator + optional git mode line
         let header_rows = if git_mode { 3 } else { 2 };
@@ -1118,6 +1115,17 @@ impl Screen {
                 )?;
             }
         }
+
+        // Fill the status bar row for fuss mode column (prevents terminal bleed-through)
+        let status_row = self.rows.saturating_sub(1);
+        execute!(self.stdout, MoveTo(0, status_row))?;
+        let status_fill = " ".repeat(width);
+        execute!(
+            self.stdout,
+            SetBackgroundColor(BG_COLOR),
+            Print(&status_fill),
+            ResetColor
+        )?;
 
         Ok(())
     }
