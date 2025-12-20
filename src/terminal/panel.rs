@@ -34,9 +34,11 @@ impl TerminalPanel {
     /// Create a new terminal panel (not yet spawned)
     pub fn new(screen_width: u16, screen_height: u16) -> Self {
         let height = (screen_height * DEFAULT_HEIGHT_PERCENT / 100).max(MIN_HEIGHT_ROWS);
+        // Content area is height - 1 (title bar takes one row)
+        let content_height = height.saturating_sub(1).max(1);
         Self {
             pty: None,
-            screen: TerminalScreen::new(screen_width, height),
+            screen: TerminalScreen::new(screen_width, content_height),
             visible: false,
             height,
             screen_height,
@@ -58,7 +60,9 @@ impl TerminalPanel {
 
     /// Spawn the PTY process
     fn spawn(&mut self) -> Result<()> {
-        let pty = Pty::spawn(self.screen_width, self.height)?;
+        // PTY gets content height (excluding title bar)
+        let content_height = self.height.saturating_sub(1).max(1);
+        let pty = Pty::spawn(self.screen_width, content_height)?;
         self.pty = Some(pty);
         Ok(())
     }
@@ -177,12 +181,15 @@ impl TerminalPanel {
         let max_height = height * MAX_HEIGHT_PERCENT / 100;
         self.height = self.height.min(max_height).max(MIN_HEIGHT_ROWS);
 
+        // Content height excludes title bar
+        let content_height = self.height.saturating_sub(1).max(1);
+
         // Resize terminal screen
-        self.screen.resize(width, self.height);
+        self.screen.resize(width, content_height);
 
         // Resize PTY
         if let Some(ref pty) = self.pty {
-            let _ = pty.resize(width, self.height);
+            let _ = pty.resize(width, content_height);
         }
     }
 
@@ -191,10 +198,13 @@ impl TerminalPanel {
         let max_height = self.screen_height * MAX_HEIGHT_PERCENT / 100;
         self.height = new_height.min(max_height).max(MIN_HEIGHT_ROWS);
 
-        self.screen.resize(self.screen_width, self.height);
+        // Content height excludes title bar
+        let content_height = self.height.saturating_sub(1).max(1);
+
+        self.screen.resize(self.screen_width, content_height);
 
         if let Some(ref pty) = self.pty {
-            let _ = pty.resize(self.screen_width, self.height);
+            let _ = pty.resize(self.screen_width, content_height);
         }
     }
 
