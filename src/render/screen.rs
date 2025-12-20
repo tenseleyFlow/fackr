@@ -3714,6 +3714,9 @@ impl Screen {
 
     /// Render the integrated terminal panel
     pub fn render_terminal(&mut self, terminal: &TerminalPanel) -> Result<()> {
+        // Hide cursor during render to prevent flicker
+        execute!(self.stdout, Hide)?;
+
         let start_row = terminal.render_start_row(self.rows);
         let height = terminal.height;
 
