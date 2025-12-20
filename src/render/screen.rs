@@ -71,6 +71,27 @@ const INACTIVE_CURRENT_LINE_BG: Color = Color::AnsiValue(234); // Dimmed current
 const INACTIVE_LINE_NUM_COLOR: Color = Color::AnsiValue(240);  // Dimmed line numbers
 const INACTIVE_TEXT_COLOR: Color = Color::AnsiValue(245);      // Dimmed text
 
+/// Extract the last component of a path for display
+fn extract_dirname(path: &str) -> String {
+    // Handle home directory
+    if path == "/" {
+        return "/".to_string();
+    }
+
+    // Get the last path component
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .map(|s| {
+            // If it starts with ~, keep it
+            if path.starts_with('~') || path == "/" {
+                s.to_string()
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
 /// Terminal screen renderer
 pub struct Screen {
     stdout: Stdout,
@@ -3728,24 +3749,108 @@ impl Screen {
             SetForegroundColor(Color::White),
         )?;
 
-        // Terminal title bar
-        let title = " Terminal ";
-        let separator = "─".repeat((self.cols as usize).saturating_sub(title.len() + 2) / 2);
-        execute!(
-            self.stdout,
-            Print(&separator),
-            SetAttribute(Attribute::Bold),
-            Print(title),
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(Color::AnsiValue(237)),
-            SetForegroundColor(Color::White),
-            Print(&separator),
-        )?;
+        // Terminal title bar with tabs
+        let session_count = terminal.session_count();
+        let active_idx = terminal.active_session_index();
 
-        // Pad to end of line
-        let printed = separator.chars().count() * 2 + title.len();
-        if printed < self.cols as usize {
-            execute!(self.stdout, Print(" ".repeat(self.cols as usize - printed)))?;
+        if session_count <= 1 {
+            // Single session: show CWD or "Terminal" centered
+            let name = terminal.active_cwd()
+                .map(|p| extract_dirname(p))
+                .unwrap_or_else(|| "Terminal".to_string());
+            let title = format!(" {} ", name);
+            let separator = "─".repeat((self.cols as usize).saturating_sub(title.len() + 2) / 2);
+            execute!(
+                self.stdout,
+                Print(&separator),
+                SetAttribute(Attribute::Bold),
+                Print(&title),
+                SetAttribute(Attribute::Reset),
+                SetBackgroundColor(Color::AnsiValue(237)),
+                SetForegroundColor(Color::White),
+                Print(&separator),
+            )?;
+
+            // Pad to end of line
+            let printed = separator.chars().count() * 2 + title.len();
+            if printed < self.cols as usize {
+                execute!(self.stdout, Print(" ".repeat(self.cols as usize - printed)))?;
+            }
+        } else {
+            // Multiple sessions: render tab bar
+            let sessions = terminal.sessions();
+            let available_width = self.cols as usize;
+            let tab_width = (available_width / session_count).max(8).min(25);
+
+            let mut printed = 0;
+            for (i, session) in sessions.iter().enumerate() {
+                let is_active = i == active_idx;
+                let name = session.cwd()
+                    .map(|p| extract_dirname(p))
+                    .unwrap_or_else(|| format!("Term {}", i + 1));
+
+                // Format: "[n] name" with truncation
+                let prefix = format!("{} ", i + 1);
+                let max_name_len = tab_width.saturating_sub(prefix.len() + 1);
+                let display_name = if name.len() > max_name_len {
+                    format!("{}…", &name[..max_name_len.saturating_sub(1)])
+                } else {
+                    name
+                };
+                let tab_content = format!("{}{}", prefix, display_name);
+
+                // Set colors based on active state
+                if is_active {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(238)),
+                        SetForegroundColor(Color::White),
+                        SetAttribute(Attribute::Bold),
+                    )?;
+                } else {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(235)),
+                        SetForegroundColor(Color::AnsiValue(245)),
+                        SetAttribute(Attribute::Reset),
+                    )?;
+                }
+
+                // Print tab with padding
+                let padding = tab_width.saturating_sub(tab_content.len());
+                let left_pad = padding / 2;
+                let right_pad = padding - left_pad;
+                execute!(
+                    self.stdout,
+                    Print(" ".repeat(left_pad)),
+                    Print(&tab_content),
+                    Print(" ".repeat(right_pad)),
+                )?;
+                printed += tab_width;
+
+                // Separator between tabs
+                if i < session_count - 1 {
+                    execute!(
+                        self.stdout,
+                        SetBackgroundColor(Color::AnsiValue(237)),
+                        SetForegroundColor(Color::AnsiValue(240)),
+                        SetAttribute(Attribute::Reset),
+                        Print("│"),
+                    )?;
+                    printed += 1;
+                }
+            }
+
+            // Fill remaining space
+            if printed < available_width {
+                execute!(
+                    self.stdout,
+                    SetBackgroundColor(Color::AnsiValue(237)),
+                    SetForegroundColor(Color::White),
+                    SetAttribute(Attribute::Reset),
+                    Print(" ".repeat(available_width - printed)),
+                )?;
+            }
         }
 
         // Terminal content area - use batched rendering to reduce flicker
