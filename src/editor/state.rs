@@ -1401,9 +1401,11 @@ impl Editor {
     fn process_key(&mut self, key_event: KeyEvent) -> Result<()> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        // Ctrl+` toggles terminal (works in both editor and terminal mode)
-        // Backtick is ` (grave accent)
-        if key_event.code == KeyCode::Char('`') && key_event.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+` or Ctrl+j toggles terminal (works in both editor and terminal mode)
+        // Ctrl+j is alternate since Ctrl+` can conflict with tmux
+        if (key_event.code == KeyCode::Char('`') || key_event.code == KeyCode::Char('j'))
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+        {
             let _ = self.terminal.toggle();
             return Ok(());
         }
