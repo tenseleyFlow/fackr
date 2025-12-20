@@ -763,10 +763,9 @@ impl Editor {
                 }
             }
 
-            // Poll terminal for output
-            if self.terminal.visible {
-                self.terminal.poll();
-                needs_render = true; // Terminal might have new output
+            // Poll terminal for output (only render if data received)
+            if self.terminal.visible && self.terminal.poll() {
+                needs_render = true;
             }
 
             // Process LSP messages from language servers

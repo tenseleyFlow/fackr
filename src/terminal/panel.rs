@@ -133,13 +133,24 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Poll for and process PTY output
-    pub fn poll(&mut self) {
+    /// Poll for and process PTY output. Returns true if data was received.
+    pub fn poll(&mut self) -> bool {
+        let mut had_data = false;
+
         if let Some(ref mut pty) = self.pty {
             if let Some(data) = pty.read() {
                 self.screen.process(&data);
+                had_data = true;
             }
         }
+
+        // Send any queued responses (e.g., device status reports) back to PTY
+        let responses = self.screen.drain_responses();
+        for response in responses {
+            let _ = self.send_input(&response);
+        }
+
+        had_data
     }
 
     /// Get the terminal screen for rendering
