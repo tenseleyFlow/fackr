@@ -1,6 +1,6 @@
 //! Terminal panel
 //!
-//! The main interface for the integrated terminal.
+//! The main interface for the integrated terminal with multi-session support.
 
 use anyhow::Result;
 
@@ -14,12 +14,90 @@ const MAX_HEIGHT_PERCENT: u16 = 80;
 /// Minimum terminal height in rows
 const MIN_HEIGHT_ROWS: u16 = 3;
 
-/// Integrated terminal panel
-pub struct TerminalPanel {
+/// A single terminal session (PTY + screen buffer)
+pub struct TerminalSession {
     /// PTY connection to shell
     pty: Option<Pty>,
     /// Terminal screen buffer
     screen: TerminalScreen,
+}
+
+impl TerminalSession {
+    /// Create a new terminal session
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            pty: None,
+            screen: TerminalScreen::new(width, height),
+        }
+    }
+
+    /// Spawn the PTY for this session
+    fn spawn(&mut self, width: u16, height: u16) -> Result<()> {
+        let pty = Pty::spawn(width, height)?;
+        self.pty = Some(pty);
+        Ok(())
+    }
+
+    /// Check if the session's shell is still alive
+    fn is_alive(&self) -> bool {
+        self.pty.as_ref().map(|p| p.is_alive()).unwrap_or(false)
+    }
+
+    /// Poll for output from this session
+    fn poll(&mut self) -> bool {
+        let mut had_data = false;
+
+        if let Some(ref mut pty) = self.pty {
+            if let Some(data) = pty.read() {
+                self.screen.process(&data);
+                had_data = true;
+            }
+        }
+
+        // Send any queued responses back to PTY
+        let responses = self.screen.drain_responses();
+        for response in responses {
+            if let Some(ref mut pty) = self.pty {
+                let _ = pty.write(&response);
+            }
+        }
+
+        had_data
+    }
+
+    /// Send input to this session
+    fn send_input(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref mut pty) = self.pty {
+            pty.write(data)?;
+        }
+        Ok(())
+    }
+
+    /// Resize this session
+    fn resize(&mut self, width: u16, height: u16) {
+        self.screen.resize(width, height);
+        if let Some(ref pty) = self.pty {
+            let _ = pty.resize(width, height);
+        }
+    }
+
+    /// Get the current working directory (from OSC 7)
+    pub fn cwd(&self) -> Option<&str> {
+        self.screen.cwd.as_deref()
+    }
+
+    /// Get the screen buffer
+    pub fn screen(&self) -> &TerminalScreen {
+        &self.screen
+    }
+}
+
+/// Integrated terminal panel with multi-session support
+pub struct TerminalPanel {
+    /// All terminal sessions
+    sessions: Vec<TerminalSession>,
+    /// Active session index
+    active_session: usize,
     /// Whether the terminal is visible
     pub visible: bool,
     /// Terminal height in rows
@@ -34,11 +112,9 @@ impl TerminalPanel {
     /// Create a new terminal panel (not yet spawned)
     pub fn new(screen_width: u16, screen_height: u16) -> Self {
         let height = (screen_height * DEFAULT_HEIGHT_PERCENT / 100).max(MIN_HEIGHT_ROWS);
-        // Content area is height - 1 (title bar takes one row)
-        let content_height = height.saturating_sub(1).max(1);
         Self {
-            pty: None,
-            screen: TerminalScreen::new(screen_width, content_height),
+            sessions: Vec::new(),
+            active_session: 0,
             visible: false,
             height,
             screen_height,
@@ -46,25 +122,96 @@ impl TerminalPanel {
         }
     }
 
+    /// Get the content height (excluding title bar)
+    fn content_height(&self) -> u16 {
+        self.height.saturating_sub(1).max(1)
+    }
+
     /// Toggle terminal visibility
     pub fn toggle(&mut self) -> Result<()> {
         self.visible = !self.visible;
 
-        // Spawn PTY on first show
-        if self.visible && self.pty.is_none() {
-            self.spawn()?;
+        // Spawn first session on first show
+        if self.visible && self.sessions.is_empty() {
+            self.new_session()?;
         }
 
         Ok(())
     }
 
-    /// Spawn the PTY process
-    fn spawn(&mut self) -> Result<()> {
-        // PTY gets content height (excluding title bar)
-        let content_height = self.height.saturating_sub(1).max(1);
-        let pty = Pty::spawn(self.screen_width, content_height)?;
-        self.pty = Some(pty);
+    /// Create a new terminal session
+    pub fn new_session(&mut self) -> Result<()> {
+        let content_height = self.content_height();
+        let mut session = TerminalSession::new(self.screen_width, content_height);
+        session.spawn(self.screen_width, content_height)?;
+        self.sessions.push(session);
+        self.active_session = self.sessions.len() - 1;
         Ok(())
+    }
+
+    /// Close the active session. Returns true if the terminal should be hidden.
+    pub fn close_active_session(&mut self) -> bool {
+        if self.sessions.is_empty() {
+            return true;
+        }
+
+        self.sessions.remove(self.active_session);
+
+        if self.sessions.is_empty() {
+            return true;
+        }
+
+        // Adjust active_session if needed
+        if self.active_session >= self.sessions.len() {
+            self.active_session = self.sessions.len() - 1;
+        }
+
+        false
+    }
+
+    /// Switch to a specific session by index
+    pub fn switch_session(&mut self, index: usize) {
+        if index < self.sessions.len() {
+            self.active_session = index;
+        }
+    }
+
+    /// Switch to the next session
+    pub fn next_session(&mut self) {
+        if !self.sessions.is_empty() {
+            self.active_session = (self.active_session + 1) % self.sessions.len();
+        }
+    }
+
+    /// Switch to the previous session
+    pub fn prev_session(&mut self) {
+        if !self.sessions.is_empty() {
+            self.active_session = if self.active_session == 0 {
+                self.sessions.len() - 1
+            } else {
+                self.active_session - 1
+            };
+        }
+    }
+
+    /// Get the number of sessions
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Get the active session index
+    pub fn active_session_index(&self) -> usize {
+        self.active_session
+    }
+
+    /// Get a reference to all sessions (for rendering tabs)
+    pub fn sessions(&self) -> &[TerminalSession] {
+        &self.sessions
+    }
+
+    /// Get the CWD of the active session
+    pub fn active_cwd(&self) -> Option<&str> {
+        self.sessions.get(self.active_session).and_then(|s| s.cwd())
     }
 
     /// Hide the terminal (ESC pressed)
@@ -72,15 +219,15 @@ impl TerminalPanel {
         self.visible = false;
     }
 
-    /// Send input to the terminal
+    /// Send input to the active terminal
     pub fn send_input(&mut self, data: &[u8]) -> Result<()> {
-        if let Some(ref mut pty) = self.pty {
-            pty.write(data)?;
+        if let Some(session) = self.sessions.get_mut(self.active_session) {
+            session.send_input(data)?;
         }
         Ok(())
     }
 
-    /// Send a key to the terminal
+    /// Send a key to the active terminal
     pub fn send_key(&mut self, key: &crossterm::event::KeyEvent) -> Result<()> {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -137,47 +284,53 @@ impl TerminalPanel {
         Ok(())
     }
 
-    /// Poll for and process PTY output. Returns true if data was received or terminal closed.
+    /// Poll for and process PTY output. Returns true if data was received or terminal state changed.
     pub fn poll(&mut self) -> bool {
-        let mut had_data = false;
+        let mut had_activity = false;
 
-        if let Some(ref mut pty) = self.pty {
-            // Check if shell has exited
-            if !pty.is_alive() {
-                // Shell exited - close terminal and clean up
-                self.visible = false;
-                self.pty = None;
-                return true; // Trigger render to hide terminal
-            }
-
-            if let Some(data) = pty.read() {
-                self.screen.process(&data);
-                had_data = true;
+        // Poll all sessions (to keep them responsive)
+        for session in &mut self.sessions {
+            if session.poll() {
+                had_activity = true;
             }
         }
 
-        // Send any queued responses (e.g., device status reports) back to PTY
-        let responses = self.screen.drain_responses();
-        for response in responses {
-            let _ = self.send_input(&response);
+        // Remove dead sessions
+        let active_before = self.active_session;
+        self.sessions.retain(|s| s.is_alive());
+
+        if self.sessions.is_empty() {
+            self.visible = false;
+            return true;
         }
 
-        had_data
+        // Adjust active_session if sessions were removed
+        if self.active_session >= self.sessions.len() {
+            self.active_session = self.sessions.len() - 1;
+            had_activity = true;
+        } else if active_before != self.active_session {
+            had_activity = true;
+        }
+
+        had_activity
     }
 
-    /// Get the terminal screen for rendering
-    pub fn screen(&self) -> &TerminalScreen {
-        &self.screen
+    /// Get the active terminal screen for rendering
+    pub fn screen(&self) -> Option<&TerminalScreen> {
+        self.sessions.get(self.active_session).map(|s| s.screen())
     }
 
-    /// Get a cell from the terminal screen
+    /// Get a cell from the active terminal screen
     pub fn get_cell(&self, row: usize, col: usize) -> Option<&Cell> {
-        self.screen.cells().get(row).and_then(|r| r.get(col))
+        self.screen()?.cells().get(row).and_then(|r| r.get(col))
     }
 
-    /// Get cursor position
+    /// Get cursor position from the active session
     pub fn cursor_pos(&self) -> (u16, u16) {
-        (self.screen.cursor_row, self.screen.cursor_col)
+        self.sessions
+            .get(self.active_session)
+            .map(|s| (s.screen.cursor_row, s.screen.cursor_col))
+            .unwrap_or((0, 0))
     }
 
     /// Update screen dimensions
@@ -189,15 +342,11 @@ impl TerminalPanel {
         let max_height = height * MAX_HEIGHT_PERCENT / 100;
         self.height = self.height.min(max_height).max(MIN_HEIGHT_ROWS);
 
-        // Content height excludes title bar
-        let content_height = self.height.saturating_sub(1).max(1);
+        let content_height = self.content_height();
 
-        // Resize terminal screen
-        self.screen.resize(width, content_height);
-
-        // Resize PTY
-        if let Some(ref pty) = self.pty {
-            let _ = pty.resize(width, content_height);
+        // Resize all sessions
+        for session in &mut self.sessions {
+            session.resize(width, content_height);
         }
     }
 
@@ -206,13 +355,11 @@ impl TerminalPanel {
         let max_height = self.screen_height * MAX_HEIGHT_PERCENT / 100;
         self.height = new_height.min(max_height).max(MIN_HEIGHT_ROWS);
 
-        // Content height excludes title bar
-        let content_height = self.height.saturating_sub(1).max(1);
+        let content_height = self.content_height();
 
-        self.screen.resize(self.screen_width, content_height);
-
-        if let Some(ref pty) = self.pty {
-            let _ = pty.resize(self.screen_width, content_height);
+        // Resize all sessions
+        for session in &mut self.sessions {
+            session.resize(self.screen_width, content_height);
         }
     }
 
