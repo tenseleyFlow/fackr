@@ -1662,7 +1662,13 @@ impl Editor {
 
         // Render fuss mode sidebar if active
         if self.workspace.fuss.active {
-            let visible_rows = self.screen.rows.saturating_sub(2) as usize;
+            // When terminal is visible, fuss mode should only render above it
+            let max_fuss_rows = if self.terminal.visible {
+                Some(self.terminal.render_start_row(self.screen.rows))
+            } else {
+                None
+            };
+            let visible_rows = max_fuss_rows.unwrap_or(self.screen.rows).saturating_sub(2) as usize;
             self.workspace.fuss.update_viewport(visible_rows);
 
             if let Some(ref tree) = self.workspace.fuss.tree {
@@ -1677,6 +1683,7 @@ impl Editor {
                     &repo_name,
                     branch.as_deref(),
                     self.workspace.fuss.git_mode,
+                    max_fuss_rows,
                 )?;
             }
         }
