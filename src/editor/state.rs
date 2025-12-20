@@ -1975,7 +1975,9 @@ impl Editor {
                 self.undo();
             }
             (Key::Char('z'), Modifiers { ctrl: true, shift: true, .. })
-            | (Key::Char(']'), Modifiers { ctrl: true, .. }) => {
+            | (Key::Char(']'), Modifiers { ctrl: true, .. })
+            | (Key::Char('5'), Modifiers { ctrl: true, .. })  // Ctrl+] reports as Ctrl+5 on some terminals
+            | (Key::Char('\x1d'), _) => {  // 0x1D = Ctrl+] as raw control character
                 self.redo();
             }
 

@@ -33,9 +33,15 @@ fn main() -> io::Result<()> {
                     let alt = modifiers.contains(KeyModifiers::ALT);
                     let shift = modifiers.contains(KeyModifiers::SHIFT);
 
+                    // Show raw char value for debugging control characters
+                    let char_info = if let KeyCode::Char(c) = code {
+                        format!(" (0x{:02X})", c as u8)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "Key: {:?} | Modifiers: ctrl={} alt={} shift={} | Kind: {:?} | State: {:?}\r",
-                        code, ctrl, alt, shift, kind, state
+                        "Key: {:?}{} | Modifiers: ctrl={} alt={} shift={} | Kind: {:?} | State: {:?}\r",
+                        code, char_info, ctrl, alt, shift, kind, state
                     );
 
                     // Quit on Ctrl+C
