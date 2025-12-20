@@ -3748,51 +3748,123 @@ impl Screen {
             execute!(self.stdout, Print(" ".repeat(self.cols as usize - printed)))?;
         }
 
-        // Terminal content area (dark background)
-        execute!(self.stdout, SetBackgroundColor(Color::AnsiValue(232)))?;
-
+        // Terminal content area - use batched rendering to reduce flicker
         let (cursor_row, cursor_col) = terminal.cursor_pos();
+        let default_bg = Color::AnsiValue(232);
+        let default_fg = Color::White;
+
+        // Track current colors to avoid redundant escape sequences
+        let mut current_fg = default_fg;
+        let mut current_bg = default_bg;
+        let mut current_bold = false;
+        let mut current_underline = false;
+
+        // Set initial colors
+        execute!(
+            self.stdout,
+            SetBackgroundColor(default_bg),
+            SetForegroundColor(default_fg)
+        )?;
 
         for row in 0..(height - 1) {
             execute!(self.stdout, MoveTo(0, start_row + 1 + row))?;
 
-            // Render cells from terminal screen
+            // Build a string of characters with same attributes to batch print
+            let mut batch = String::new();
+            let mut batch_fg = current_fg;
+            let mut batch_bg = current_bg;
+            let mut batch_bold = current_bold;
+            let mut batch_underline = current_underline;
+
             for col in 0..self.cols as usize {
-                if let Some(cell) = terminal.get_cell(row as usize, col) {
-                    // Set colors
-                    let fg = TerminalPanel::to_crossterm_color(&cell.fg);
-                    let bg = TerminalPanel::to_crossterm_color(&cell.bg);
-
-                    if cell.inverse {
-                        execute!(
-                            self.stdout,
-                            SetForegroundColor(if bg == Color::Reset { Color::AnsiValue(232) } else { bg }),
-                            SetBackgroundColor(if fg == Color::Reset { Color::White } else { fg }),
-                        )?;
+                let (c, fg, bg, bold, underline) = if let Some(cell) = terminal.get_cell(row as usize, col) {
+                    let (fg, bg) = if cell.inverse {
+                        let fg = TerminalPanel::to_crossterm_color(&cell.bg);
+                        let bg = TerminalPanel::to_crossterm_color(&cell.fg);
+                        (
+                            if fg == Color::Reset { default_bg } else { fg },
+                            if bg == Color::Reset { default_fg } else { bg },
+                        )
                     } else {
-                        execute!(
-                            self.stdout,
-                            SetForegroundColor(if fg == Color::Reset { Color::White } else { fg }),
-                            SetBackgroundColor(if bg == Color::Reset { Color::AnsiValue(232) } else { bg }),
-                        )?;
-                    }
-
-                    if cell.bold {
-                        execute!(self.stdout, SetAttribute(Attribute::Bold))?;
-                    }
-                    if cell.underline {
-                        execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
-                    }
-
-                    execute!(self.stdout, Print(cell.c))?;
-
-                    if cell.bold || cell.underline {
-                        execute!(self.stdout, SetAttribute(Attribute::Reset))?;
-                        execute!(self.stdout, SetBackgroundColor(Color::AnsiValue(232)))?;
-                    }
+                        let fg = TerminalPanel::to_crossterm_color(&cell.fg);
+                        let bg = TerminalPanel::to_crossterm_color(&cell.bg);
+                        (
+                            if fg == Color::Reset { default_fg } else { fg },
+                            if bg == Color::Reset { default_bg } else { bg },
+                        )
+                    };
+                    (cell.c, fg, bg, cell.bold, cell.underline)
                 } else {
-                    execute!(self.stdout, Print(' '))?;
+                    (' ', default_fg, default_bg, false, false)
+                };
+
+                // Check if attributes changed
+                if fg != batch_fg || bg != batch_bg || bold != batch_bold || underline != batch_underline {
+                    // Flush current batch
+                    if !batch.is_empty() {
+                        // Apply batch attributes if different from current
+                        if batch_fg != current_fg {
+                            execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                            current_fg = batch_fg;
+                        }
+                        if batch_bg != current_bg {
+                            execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                            current_bg = batch_bg;
+                        }
+                        if batch_bold != current_bold {
+                            if batch_bold {
+                                execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                            } else {
+                                execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                            }
+                            current_bold = batch_bold;
+                        }
+                        if batch_underline != current_underline {
+                            if batch_underline {
+                                execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                            } else {
+                                execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                            }
+                            current_underline = batch_underline;
+                        }
+                        execute!(self.stdout, Print(&batch))?;
+                        batch.clear();
+                    }
+                    batch_fg = fg;
+                    batch_bg = bg;
+                    batch_bold = bold;
+                    batch_underline = underline;
                 }
+                batch.push(c);
+            }
+
+            // Flush remaining batch for this row
+            if !batch.is_empty() {
+                if batch_fg != current_fg {
+                    execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                    current_fg = batch_fg;
+                }
+                if batch_bg != current_bg {
+                    execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                    current_bg = batch_bg;
+                }
+                if batch_bold != current_bold {
+                    if batch_bold {
+                        execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                    } else {
+                        execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                    }
+                    current_bold = batch_bold;
+                }
+                if batch_underline != current_underline {
+                    if batch_underline {
+                        execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                    } else {
+                        execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                    }
+                    current_underline = batch_underline;
+                }
+                execute!(self.stdout, Print(&batch))?;
             }
         }
 
