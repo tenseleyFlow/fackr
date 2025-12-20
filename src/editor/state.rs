@@ -1427,6 +1427,43 @@ impl Editor {
                 self.terminal_resize_dragging = false;
                 return Ok(());
             }
+
+            // Terminal tab management keybindings (Alt + key)
+            if key_event.modifiers.contains(KeyModifiers::ALT) {
+                match key_event.code {
+                    // Alt+T: New terminal tab
+                    KeyCode::Char('t') => {
+                        let _ = self.terminal.new_session();
+                        return Ok(());
+                    }
+                    // Alt+Q: Close current tab
+                    KeyCode::Char('q') => {
+                        if self.terminal.close_active_session() {
+                            self.terminal.hide();
+                            self.terminal_resize_dragging = false;
+                        }
+                        return Ok(());
+                    }
+                    // Alt+.: Next tab
+                    KeyCode::Char('.') => {
+                        self.terminal.next_session();
+                        return Ok(());
+                    }
+                    // Alt+,: Previous tab
+                    KeyCode::Char(',') => {
+                        self.terminal.prev_session();
+                        return Ok(());
+                    }
+                    // Alt+1-9: Switch to specific tab
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let idx = (c as usize) - ('1' as usize);
+                        self.terminal.switch_session(idx);
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+
             // Send all other keys to terminal
             let _ = self.terminal.send_key(&key_event);
             return Ok(());
