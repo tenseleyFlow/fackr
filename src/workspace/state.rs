@@ -6,13 +6,69 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::buffer::Buffer;
-use crate::editor::{Cursors, History};
+use crate::editor::{Cursor, Cursors, History};
 use crate::fuss::FussMode;
 use crate::lsp::LspClient;
 use crate::syntax::Highlighter;
+
+// ============================================================================
+// Serializable state structures for workspace persistence
+// ============================================================================
+
+/// Serializable workspace state for persistence
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkspaceState {
+    active_tab: usize,
+    tabs: Vec<TabState>,
+}
+
+/// Serializable tab state
+#[derive(Debug, Serialize, Deserialize)]
+struct TabState {
+    /// Files open in this tab (by path)
+    files: Vec<FileState>,
+    /// Active pane index
+    active_pane: usize,
+    /// Pane configurations
+    panes: Vec<PaneState>,
+}
+
+/// Serializable file reference
+#[derive(Debug, Serialize, Deserialize)]
+struct FileState {
+    /// Path to file (None for unsaved)
+    path: Option<PathBuf>,
+    /// Whether file is outside workspace
+    is_orphan: bool,
+}
+
+/// Serializable pane state
+#[derive(Debug, Serialize, Deserialize)]
+struct PaneState {
+    /// Index into tab's files
+    buffer_idx: usize,
+    /// Primary cursor position
+    cursor_line: usize,
+    cursor_col: usize,
+    /// Viewport scroll position
+    viewport_line: usize,
+    viewport_col: usize,
+    /// Pane bounds (normalized 0.0-1.0)
+    bounds: BoundsState,
+}
+
+/// Serializable pane bounds
+#[derive(Debug, Serialize, Deserialize)]
+struct BoundsState {
+    x_start: f32,
+    y_start: f32,
+    x_end: f32,
+    y_end: f32,
+}
 
 /// Normalized pane bounds (0.0 to 1.0)
 /// Converted to screen coordinates at render time
@@ -721,8 +777,119 @@ impl Workspace {
             return Ok(());
         }
 
-        // TODO: Implement JSON deserialization
-        // For now, just return Ok - we'll add full persistence later
+        // Read and parse JSON
+        let json = std::fs::read_to_string(&state_path)?;
+        let state: WorkspaceState = match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                // If JSON is corrupted, log and continue with empty workspace
+                eprintln!("Warning: Failed to parse workspace.json: {}", e);
+                return Ok(());
+            }
+        };
+
+        // Restore tabs from state
+        let mut restored_tabs = Vec::new();
+        for tab_state in state.tabs {
+            // Try to open each file in the tab
+            let mut buffers = Vec::new();
+            let mut valid_buffer_map: Vec<Option<usize>> = Vec::new(); // Maps old index to new index
+
+            for file_state in &tab_state.files {
+                if let Some(ref path) = file_state.path {
+                    // Resolve path (relative or absolute based on orphan status)
+                    let full_path = if file_state.is_orphan {
+                        path.clone()
+                    } else {
+                        self.root.join(path)
+                    };
+
+                    // Only restore if file still exists
+                    if full_path.exists() {
+                        match BufferEntry::from_file(&full_path, &self.root) {
+                            Ok(entry) => {
+                                valid_buffer_map.push(Some(buffers.len()));
+                                buffers.push(entry);
+                            }
+                            Err(_) => {
+                                valid_buffer_map.push(None);
+                            }
+                        }
+                    } else {
+                        valid_buffer_map.push(None);
+                    }
+                } else {
+                    // Unsaved file - skip it (can't restore without content)
+                    valid_buffer_map.push(None);
+                }
+            }
+
+            // Skip tab if no files could be restored
+            if buffers.is_empty() {
+                continue;
+            }
+
+            // Restore panes, mapping buffer indices
+            let mut panes = Vec::new();
+            for pane_state in &tab_state.panes {
+                // Check if this pane's buffer was successfully loaded
+                if let Some(Some(new_idx)) = valid_buffer_map.get(pane_state.buffer_idx) {
+                    let mut pane = Pane::with_buffer_idx(*new_idx);
+
+                    // Restore cursor position (clamped to buffer bounds)
+                    let buffer = &buffers[*new_idx].buffer;
+                    let line = pane_state.cursor_line.min(buffer.line_count().saturating_sub(1));
+                    let col = if line < buffer.line_count() {
+                        pane_state.cursor_col.min(buffer.line_len(line))
+                    } else {
+                        0
+                    };
+                    pane.cursors = Cursors::from_cursor(Cursor {
+                        line,
+                        col,
+                        desired_col: col,
+                        anchor_line: line,
+                        anchor_col: col,
+                        selecting: false,
+                    });
+
+                    // Restore viewport
+                    pane.viewport_line = pane_state.viewport_line.min(buffer.line_count().saturating_sub(1));
+                    pane.viewport_col = pane_state.viewport_col;
+
+                    // Restore bounds
+                    pane.bounds = PaneBounds {
+                        x_start: pane_state.bounds.x_start,
+                        y_start: pane_state.bounds.y_start,
+                        x_end: pane_state.bounds.x_end,
+                        y_end: pane_state.bounds.y_end,
+                    };
+
+                    panes.push(pane);
+                }
+            }
+
+            // Ensure at least one pane exists
+            if panes.is_empty() {
+                panes.push(Pane::default());
+            }
+
+            // Clamp active_pane to valid range
+            let active_pane = tab_state.active_pane.min(panes.len().saturating_sub(1));
+
+            restored_tabs.push(Tab {
+                buffers,
+                panes,
+                active_pane,
+            });
+        }
+
+        // Only replace tabs if we successfully restored at least one
+        if !restored_tabs.is_empty() {
+            self.tabs = restored_tabs;
+            self.active_tab = state.active_tab.min(self.tabs.len().saturating_sub(1));
+        }
+
         Ok(())
     }
 
@@ -730,10 +897,67 @@ impl Workspace {
     pub fn save(&self) -> Result<()> {
         self.init()?; // Ensure .fackr/ exists
 
-        let _state_path = self.root.join(".fackr").join("workspace.json");
+        let state_path = self.root.join(".fackr").join("workspace.json");
 
-        // TODO: Implement JSON serialization
-        // For now, just return Ok - we'll add full persistence later
+        // Build serializable state
+        let mut tabs = Vec::new();
+        for tab in &self.tabs {
+            // Collect file states
+            let files: Vec<FileState> = tab.buffers.iter().map(|b| {
+                FileState {
+                    path: b.path.clone(),
+                    is_orphan: b.is_orphan,
+                }
+            }).collect();
+
+            // Only save tabs that have at least one saved file
+            if files.iter().all(|f| f.path.is_none()) {
+                continue;
+            }
+
+            // Collect pane states
+            let panes: Vec<PaneState> = tab.panes.iter().map(|p| {
+                let cursor = p.cursors.primary();
+                PaneState {
+                    buffer_idx: p.buffer_idx,
+                    cursor_line: cursor.line,
+                    cursor_col: cursor.col,
+                    viewport_line: p.viewport_line,
+                    viewport_col: p.viewport_col,
+                    bounds: BoundsState {
+                        x_start: p.bounds.x_start,
+                        y_start: p.bounds.y_start,
+                        x_end: p.bounds.x_end,
+                        y_end: p.bounds.y_end,
+                    },
+                }
+            }).collect();
+
+            tabs.push(TabState {
+                files,
+                active_pane: tab.active_pane,
+                panes,
+            });
+        }
+
+        // Don't save if there's nothing meaningful to save
+        if tabs.is_empty() {
+            // Remove old state file if it exists
+            if state_path.exists() {
+                let _ = std::fs::remove_file(&state_path);
+            }
+            return Ok(());
+        }
+
+        let state = WorkspaceState {
+            active_tab: self.active_tab.min(tabs.len().saturating_sub(1)),
+            tabs,
+        };
+
+        // Serialize and write
+        let json = serde_json::to_string_pretty(&state)?;
+        std::fs::write(&state_path, json)?;
+
         Ok(())
     }
 
@@ -745,6 +969,15 @@ impl Workspace {
     /// Get mutable reference to active tab
     pub fn active_tab_mut(&mut self) -> &mut Tab {
         &mut self.tabs[self.active_tab]
+    }
+
+    /// Check if a tab is an empty default tab (no path, not modified, empty content)
+    fn is_empty_default_tab(tab: &mut Tab) -> bool {
+        if tab.buffers.len() != 1 || tab.panes.len() != 1 {
+            return false;
+        }
+        let buf = &mut tab.buffers[0];
+        buf.path.is_none() && !buf.is_modified() && buf.buffer.len_chars() == 0
     }
 
     /// Open a file in a new tab
@@ -781,16 +1014,29 @@ impl Workspace {
             let _ = self.lsp.open_document(&path_str, &content);
         }
 
-        self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
+        // If we have exactly one empty default tab, replace it instead of adding
+        if self.tabs.len() == 1 && Self::is_empty_default_tab(&mut self.tabs[0]) {
+            self.tabs[0] = tab;
+            self.active_tab = 0;
+        } else {
+            self.tabs.push(tab);
+            self.active_tab = self.tabs.len() - 1;
+        }
         Ok(())
     }
 
     /// Open a new file (doesn't exist yet) in a new tab
     pub fn open_new_file(&mut self, path: &Path) -> Result<()> {
         let tab = Tab::new_file(path, &self.root);
-        self.tabs.push(tab);
-        self.active_tab = self.tabs.len() - 1;
+
+        // If we have exactly one empty default tab, replace it instead of adding
+        if self.tabs.len() == 1 && Self::is_empty_default_tab(&mut self.tabs[0]) {
+            self.tabs[0] = tab;
+            self.active_tab = 0;
+        } else {
+            self.tabs.push(tab);
+            self.active_tab = self.tabs.len() - 1;
+        }
         Ok(())
     }
 

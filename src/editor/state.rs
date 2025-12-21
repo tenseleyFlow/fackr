@@ -832,6 +832,11 @@ impl Editor {
             }
         }
 
+        // Save workspace state before exiting
+        if let Err(e) = self.workspace.save() {
+            eprintln!("Warning: Failed to save workspace state: {}", e);
+        }
+
         self.screen.leave_raw_mode()?;
         Ok(())
     }

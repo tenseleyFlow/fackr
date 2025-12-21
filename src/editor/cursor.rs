@@ -175,6 +175,14 @@ impl Cursors {
         }
     }
 
+    /// Create a Cursors container from a single cursor
+    pub fn from_cursor(cursor: Cursor) -> Self {
+        Self {
+            cursors: vec![cursor],
+            primary: 0,
+        }
+    }
+
     /// Get the primary cursor
     pub fn primary(&self) -> &Cursor {
         &self.cursors[self.primary]
