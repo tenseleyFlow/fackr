@@ -165,13 +165,8 @@ impl Screen {
     }
 
     /// Render the tab bar
-    /// Returns the height of the tab bar (1 if rendered, 0 if only one tab)
+    /// Returns the height of the tab bar (always 1)
     pub fn render_tab_bar(&mut self, tabs: &[TabInfo], left_offset: u16) -> Result<u16> {
-        // Only show tab bar if there's more than one tab
-        if tabs.len() <= 1 {
-            return Ok(0);
-        }
-
         execute!(self.stdout, MoveTo(left_offset, 0))?;
 
         // Fill the tab bar background
