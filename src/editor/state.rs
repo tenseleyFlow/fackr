@@ -4507,14 +4507,14 @@ impl Editor {
     fn save(&mut self) -> Result<()> {
         let path = self.filename();
         if let Some(ref p) = path {
-            self.buffer_mut().save(p)?;
-            self.buffer_entry_mut().mark_saved();
-            // Delete backup after successful save (use full path to match backup hash)
+            // Construct full path: orphan files use absolute path, workspace files need root prefix
             let full_path = if self.buffer_entry().is_orphan {
                 p.clone()
             } else {
                 self.workspace.root.join(p)
             };
+            self.buffer_mut().save(&full_path)?;
+            self.buffer_entry_mut().mark_saved();
             let _ = self.workspace.delete_backup(&full_path);
             self.message = Some("Saved".to_string());
         }
