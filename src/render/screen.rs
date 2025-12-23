@@ -285,7 +285,7 @@ impl Screen {
 
         // Calculate available screen area
         let available_width = self.cols.saturating_sub(left_offset) as f32;
-        let available_height = self.rows.saturating_sub(1 + top_offset) as f32; // -1 for status bar
+        let available_height = self.rows.saturating_sub(2 + top_offset) as f32; // -2 for gap + status bar
 
         // Track where to place the hardware cursor (active pane's primary cursor)
         let mut cursor_screen_pos: Option<(u16, u16)> = None;
@@ -341,6 +341,16 @@ impl Screen {
                 }
             }
         }
+
+        // Render the gap row (empty line between text and status bar)
+        let gap_row = top_offset + available_height as u16;
+        execute!(
+            self.stdout,
+            MoveTo(left_offset, gap_row),
+            SetBackgroundColor(BG_COLOR),
+            Clear(ClearType::UntilNewLine),
+            ResetColor
+        )?;
 
         // Render status bar (use active pane's info)
         if let Some(active_pane) = panes.iter().find(|p| p.is_active) {

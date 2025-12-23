@@ -599,7 +599,7 @@ impl Tab {
     pub fn pane_at_screen_position(&self, col: u16, row: u16, screen_cols: u16, screen_rows: u16, left_offset: u16, top_offset: u16) -> usize {
         // Available space for panes (excluding fuss width and tab bar)
         let available_width = screen_cols.saturating_sub(left_offset) as f32;
-        let available_height = screen_rows.saturating_sub(1 + top_offset) as f32; // -1 for status bar
+        let available_height = screen_rows.saturating_sub(2 + top_offset) as f32; // -2 for gap + status bar
 
         // Adjust click coordinates for offsets
         let adj_col = col.saturating_sub(left_offset) as f32;
@@ -1423,7 +1423,8 @@ impl Workspace {
         } else {
             0
         };
-        let top_offset = if self.tabs.len() > 1 { 1u16 } else { 0 };
+        // Tab bar is always rendered (takes 1 row)
+        let top_offset = 1u16;
 
         self.tabs[self.active_tab].pane_at_screen_position(
             col, row, screen_cols, screen_rows, fuss_width, top_offset

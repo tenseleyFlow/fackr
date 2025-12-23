@@ -1638,7 +1638,8 @@ impl Editor {
         } else {
             0
         };
-        let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+        // Tab bar is always rendered (takes 1 row)
+        let top_offset = 1;
 
         // Calculate line number column width (same as in screen.rs)
         let line_num_width = {
@@ -1766,8 +1767,8 @@ impl Editor {
             }
             Mouse::ScrollDown { .. } => {
                 // Scroll down 3 lines
-                // Calculate visible rows (accounting for tab bar, gap, and status bar)
-                let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+                // Calculate visible rows (tab bar always rendered, plus gap and status bar)
+                let top_offset = 1;
                 let visible_rows = (self.screen.rows as usize).saturating_sub(2 + top_offset);
                 // Max viewport is when the last line is at the bottom of visible area
                 let max_viewport = self.buffer().line_count().saturating_sub(visible_rows).max(0);
@@ -4448,8 +4449,8 @@ impl Editor {
     // === Viewport ===
 
     fn scroll_to_cursor(&mut self) {
-        // Calculate top offset (tab bar takes 1 row if multiple tabs)
-        let top_offset = if self.workspace.tabs.len() > 1 { 1 } else { 0 };
+        // Tab bar is always rendered (takes 1 row)
+        let top_offset = 1;
         // Vertical scrolling (2 rows reserved: gap + status bar, plus top_offset for tab bar)
         let visible_rows = (self.screen.rows as usize).saturating_sub(2 + top_offset);
 
