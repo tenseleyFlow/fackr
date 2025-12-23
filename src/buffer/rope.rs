@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ropey::Rope;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
@@ -172,6 +173,30 @@ impl Buffer {
     /// Get entire buffer content as a String
     pub fn contents(&self) -> String {
         self.text.to_string()
+    }
+
+    /// Extract all unique words from the buffer for autocomplete.
+    /// Words are alphanumeric sequences with underscores, minimum 3 characters.
+    pub fn extract_words(&self) -> Vec<String> {
+        let mut words = HashSet::new();
+        let mut current_word = String::new();
+
+        for ch in self.text.chars() {
+            if ch.is_alphanumeric() || ch == '_' {
+                current_word.push(ch);
+            } else {
+                if current_word.len() >= 3 {
+                    words.insert(current_word.clone());
+                }
+                current_word.clear();
+            }
+        }
+        // Don't forget the last word
+        if current_word.len() >= 3 {
+            words.insert(current_word);
+        }
+
+        words.into_iter().collect()
     }
 
     /// Compute a hash of the buffer contents for change detection.

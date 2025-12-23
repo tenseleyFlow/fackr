@@ -1276,6 +1276,7 @@ impl Screen {
         top_offset: u16,
         is_modified: bool,
         highlighter: &mut Highlighter,
+        ghost_text: Option<&str>,
     ) -> Result<()> {
         execute!(self.stdout, Hide)?;
 
@@ -1389,6 +1390,25 @@ impl Screen {
                         &secondary_cursors,
                         &adjusted_tokens,
                     )?;
+
+                    // Render ghost text on the current line after the cursor
+                    if is_current_line {
+                        if let Some(ghost) = ghost_text {
+                            // Calculate remaining space for ghost text
+                            let line_len = display_line.chars().count();
+                            let remaining_cols = text_cols.saturating_sub(line_len);
+                            if remaining_cols > 0 {
+                                // Truncate ghost text if it doesn't fit
+                                let ghost_display: String = ghost.chars().take(remaining_cols).collect();
+                                execute!(
+                                    self.stdout,
+                                    SetBackgroundColor(line_bg),
+                                    SetForegroundColor(Color::AnsiValue(240)), // Dim gray
+                                    Print(&ghost_display),
+                                )?;
+                            }
+                        }
+                    }
                 }
 
                 execute!(

@@ -483,6 +483,33 @@ struct BracketMatchCache {
     valid: bool,
 }
 
+/// Source of ghost text suggestion
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+enum GhostTextSource {
+    #[default]
+    None,
+    Lsp,
+    CurrentBuffer,
+    OtherBuffer,
+}
+
+/// Ghost text inline autocomplete state
+#[derive(Debug, Default)]
+struct GhostTextState {
+    /// The ghost text suggestion (suffix to show/insert after cursor)
+    suggestion: Option<String>,
+    /// Position where suggestion applies (line, col)
+    position: Option<(usize, usize)>,
+    /// The prefix that was used to generate this suggestion
+    prefix: String,
+    /// Source of the current suggestion
+    source: GhostTextSource,
+    /// Cached word list from current buffer (content_hash, words)
+    buffer_words_cache: Option<(u64, Vec<String>)>,
+    /// Cached word list from all open buffers
+    all_buffer_words_cache: Vec<String>,
+}
+
 /// Main editor state
 pub struct Editor {
     /// The workspace (owns tabs, panes, fuss mode, and config)
@@ -511,6 +538,8 @@ pub struct Editor {
     search_state: SearchState,
     /// Cached bracket match for rendering
     bracket_cache: BracketMatchCache,
+    /// Ghost text inline autocomplete state
+    ghost_text: GhostTextState,
     /// Yank stack (kill ring) - separate from system clipboard
     yank_stack: Vec<String>,
     /// Current index in yank stack when cycling with Alt+Y
@@ -575,6 +604,7 @@ impl Editor {
             server_manager: ServerManagerPanel::new(),
             search_state: SearchState::default(),
             bracket_cache: BracketMatchCache::default(),
+            ghost_text: GhostTextState::default(),
             yank_stack: Vec::with_capacity(32),
             yank_index: None,
             last_yank_len: 0,
@@ -1448,6 +1478,152 @@ impl Editor {
         self.lsp_state.completion_index = 0;
     }
 
+    // === Ghost Text (Inline Autocomplete) ===
+
+    /// Update ghost text suggestion based on current cursor position
+    fn update_ghost_text(&mut self) {
+        // Don't show ghost text if completion popup is visible
+        if self.lsp_state.completion_visible {
+            self.ghost_text.suggestion = None;
+            return;
+        }
+
+        let cursor = self.cursor();
+        let line_idx = cursor.line;
+        let col = cursor.col;
+
+        // Get current line and extract prefix (word before cursor)
+        let prefix = match self.buffer().line_str(line_idx) {
+            Some(line) => {
+                let before_cursor: String = line.chars().take(col).collect();
+                // Walk back to find word start
+                before_cursor
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            }
+            None => return,
+        };
+
+        // Don't suggest for very short prefixes
+        if prefix.len() < 2 {
+            self.ghost_text.suggestion = None;
+            return;
+        }
+
+        // Try to find best suggestion from all sources
+        if let Some(full_word) = self.find_best_suggestion(&prefix) {
+            // Ghost text is the suffix (part after prefix)
+            if full_word.len() > prefix.len() {
+                let suffix = full_word[prefix.len()..].to_string();
+                self.ghost_text.suggestion = Some(suffix);
+                self.ghost_text.position = Some((line_idx, col));
+                self.ghost_text.prefix = prefix;
+                return;
+            }
+        }
+
+        self.ghost_text.suggestion = None;
+    }
+
+    /// Find best matching suggestion from all sources (LSP, current buffer, other buffers)
+    fn find_best_suggestion(&mut self, prefix: &str) -> Option<String> {
+        let prefix_lower = prefix.to_lowercase();
+
+        // Priority 1: LSP completions (if we have recent ones)
+        for item in &self.lsp_state.completions_original {
+            let text = item.insert_text.as_ref().unwrap_or(&item.label);
+            if text.to_lowercase().starts_with(&prefix_lower) && text.len() > prefix.len() {
+                self.ghost_text.source = GhostTextSource::Lsp;
+                return Some(text.clone());
+            }
+        }
+
+        // Priority 2: Current buffer words
+        let buffer_hash = self.buffer_mut().content_hash();
+        let needs_refresh = self
+            .ghost_text
+            .buffer_words_cache
+            .as_ref()
+            .map(|(h, _)| *h != buffer_hash)
+            .unwrap_or(true);
+
+        if needs_refresh {
+            let words = self.buffer().extract_words();
+            self.ghost_text.buffer_words_cache = Some((buffer_hash, words));
+        }
+
+        if let Some((_, ref words)) = self.ghost_text.buffer_words_cache {
+            for word in words {
+                if word.to_lowercase().starts_with(&prefix_lower)
+                    && word != prefix
+                    && word.len() > prefix.len()
+                {
+                    self.ghost_text.source = GhostTextSource::CurrentBuffer;
+                    return Some(word.clone());
+                }
+            }
+        }
+
+        // Priority 3: Words from other buffers
+        for word in &self.ghost_text.all_buffer_words_cache {
+            if word.to_lowercase().starts_with(&prefix_lower)
+                && word != prefix
+                && word.len() > prefix.len()
+            {
+                self.ghost_text.source = GhostTextSource::OtherBuffer;
+                return Some(word.clone());
+            }
+        }
+
+        None
+    }
+
+    /// Collect words from all open buffers in workspace
+    fn collect_all_buffer_words(&self) -> Vec<String> {
+        let mut words = std::collections::HashSet::new();
+        for tab in &self.workspace.tabs {
+            for buffer_entry in &tab.buffers {
+                for word in buffer_entry.buffer.extract_words() {
+                    words.insert(word);
+                }
+            }
+        }
+        words.into_iter().collect()
+    }
+
+    /// Accept the current ghost text suggestion
+    fn accept_ghost_text(&mut self) {
+        if let Some(suffix) = self.ghost_text.suggestion.take() {
+            self.insert_text(&suffix);
+            self.ghost_text.position = None;
+            self.ghost_text.prefix.clear();
+        }
+    }
+
+    /// Dismiss ghost text (clear suggestion)
+    fn dismiss_ghost_text(&mut self) {
+        self.ghost_text.suggestion = None;
+        self.ghost_text.position = None;
+        self.ghost_text.prefix.clear();
+    }
+
+    /// Check if ghost text should be dismissed due to cursor movement
+    fn validate_ghost_text_position(&mut self) {
+        if let Some((line, col)) = self.ghost_text.position {
+            let cursor = self.cursor();
+            // Dismiss if cursor moved to different line or before the prefix start
+            let prefix_start = col.saturating_sub(self.ghost_text.prefix.len());
+            if cursor.line != line || cursor.col < prefix_start || cursor.col > col {
+                self.dismiss_ghost_text();
+            }
+        }
+    }
+
     /// Process a key event, handling ESC as potential Alt prefix
     fn process_key(&mut self, key_event: KeyEvent) -> Result<()> {
         use crossterm::event::{KeyCode, KeyModifiers};
@@ -1900,6 +2076,7 @@ impl Editor {
                     top_offset,
                     is_modified,
                     &mut buffer_entry.highlighter,
+                    self.ghost_text.suggestion.as_deref(),
                 )?;
             }
 
@@ -2272,6 +2449,7 @@ impl Editor {
                 } else {
                     self.cursors_mut().primary_mut().clear_selection();
                 }
+                self.dismiss_ghost_text();
             }
 
             // === Undo/Redo ===
@@ -2318,20 +2496,44 @@ impl Editor {
             (Key::Char('f'), Modifiers { alt: true, .. }) => self.move_word_right(false),
 
             // === Movement with selection ===
-            (Key::Up, Modifiers { shift, .. }) => self.move_up(*shift),
-            (Key::Down, Modifiers { shift, .. }) => self.move_down(*shift),
-            (Key::Left, Modifiers { shift, .. }) => self.move_left(*shift),
-            (Key::Right, Modifiers { shift, .. }) => self.move_right(*shift),
+            (Key::Up, Modifiers { shift, .. }) => {
+                self.move_up(*shift);
+                self.validate_ghost_text_position();
+            }
+            (Key::Down, Modifiers { shift, .. }) => {
+                self.move_down(*shift);
+                self.validate_ghost_text_position();
+            }
+            (Key::Left, Modifiers { shift, .. }) => {
+                self.move_left(*shift);
+                self.validate_ghost_text_position();
+            }
+            (Key::Right, Modifiers { shift, .. }) => {
+                self.move_right(*shift);
+                self.validate_ghost_text_position();
+            }
 
             // Home/End
-            (Key::Home, Modifiers { shift, .. }) => self.move_home(*shift),
-            (Key::End, Modifiers { shift, .. }) => self.move_end(*shift),
+            (Key::Home, Modifiers { shift, .. }) => {
+                self.move_home(*shift);
+                self.validate_ghost_text_position();
+            }
+            (Key::End, Modifiers { shift, .. }) => {
+                self.move_end(*shift);
+                self.validate_ghost_text_position();
+            }
             (Key::Char('a'), Modifiers { ctrl: true, shift, .. }) => self.smart_home(*shift),
             (Key::Char('e'), Modifiers { ctrl: true, shift, .. }) => self.move_end(*shift),
 
             // Page movement
-            (Key::PageUp, Modifiers { shift, .. }) => self.page_up(*shift),
-            (Key::PageDown, Modifiers { shift, .. }) => self.page_down(*shift),
+            (Key::PageUp, Modifiers { shift, .. }) => {
+                self.page_up(*shift);
+                self.validate_ghost_text_position();
+            }
+            (Key::PageDown, Modifiers { shift, .. }) => {
+                self.page_down(*shift);
+                self.validate_ghost_text_position();
+            }
 
             // Join lines: Ctrl+J
             (Key::Char('j'), Modifiers { ctrl: true, .. }) => self.join_lines(),
@@ -2374,13 +2576,30 @@ impl Editor {
             (Key::Char(c), Modifiers { ctrl: false, alt: false, .. }) => {
                 self.insert_char(*c);
             }
-            (Key::Enter, _) => self.insert_newline(),
-            (Key::Backspace, Modifiers { alt: true, .. }) => self.delete_word_backward(),
+            (Key::Enter, _) => {
+                self.insert_newline();
+                self.dismiss_ghost_text();
+            }
+            (Key::Backspace, Modifiers { alt: true, .. }) => {
+                self.delete_word_backward();
+                self.update_ghost_text();
+            }
             (Key::Backspace, _) | (Key::Char('h'), Modifiers { ctrl: true, .. }) => {
                 self.delete_backward();
+                self.update_ghost_text();
             }
-            (Key::Delete, _) => self.delete_forward(),
-            (Key::Tab, _) => self.insert_tab(),
+            (Key::Delete, _) => {
+                self.delete_forward();
+                self.dismiss_ghost_text();
+            }
+            (Key::Tab, _) => {
+                // Accept ghost text if visible and no selection
+                if self.ghost_text.suggestion.is_some() && !self.cursor().has_selection() {
+                    self.accept_ghost_text();
+                } else {
+                    self.insert_tab();
+                }
+            }
             (Key::BackTab, _) => self.dedent(),
 
             // Delete word backward: Ctrl+W
@@ -3282,6 +3501,7 @@ impl Editor {
         // For multi-cursor, use simple insert (skip auto-pair complexity for now)
         if self.cursors().len() > 1 {
             self.insert_text_multi(&c.to_string());
+            self.dismiss_ghost_text();
             return;
         }
 
@@ -3292,6 +3512,7 @@ impl Editor {
             if c == next_char && (c == ')' || c == ']' || c == '}' || c == '"' || c == '\'' || c == '`') {
                 self.cursor_mut().col += 1;
                 self.cursor_mut().desired_col = self.cursor().col;
+                self.dismiss_ghost_text();
                 return;
             }
         }
@@ -3334,11 +3555,19 @@ impl Editor {
 
                 let cursor_after = self.cursor_pos();
                 self.history_mut().record_insert(idx, pair_str, cursor_before, cursor_after);
+                self.dismiss_ghost_text();
                 return;
             }
         }
 
         self.insert_text(&c.to_string());
+
+        // Update ghost text after alphanumeric input
+        if c.is_alphanumeric() || c == '_' {
+            self.update_ghost_text();
+        } else {
+            self.dismiss_ghost_text();
+        }
     }
 
     /// Get character at cursor position (if any)

@@ -1,0 +1,61 @@
+Ghost Text Autocomplete Test File
+==================================
+
+Words to test (type first 2-3 letters, then Tab to accept):
+
+hello
+hello
+hello
+
+world
+world
+world
+
+function
+function
+function
+
+variable
+variable
+variable
+
+testing
+testing
+testing
+
+autocomplete
+autocomplete
+autocomplete
+
+suggestion
+suggestion
+suggestion
+
+keyboard
+keyboard
+keyboard
+
+terminal
+terminal
+terminal
+
+implementation
+implementation
+implementation
+
+---
+
+Try typing below this line:
+
+
+
+---
+
+Expected behaviors:
+1. Type "hel" -> ghost text shows "lo" in dim gray
+2. Press Tab -> "lo" is inserted, cursor at end of "hello"
+3. Type "fun" -> ghost text shows "ction"
+4. Press Escape -> ghost text disappears
+5. Type "var" -> ghost text shows "iable"
+6. Press arrow key -> ghost text disappears
+7. Tab with no ghost text -> inserts 4 spaces (normal indent)
