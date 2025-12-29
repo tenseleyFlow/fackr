@@ -44,7 +44,17 @@ impl Key {
     pub fn from_crossterm(event: KeyEvent) -> (Self, Modifiers) {
         let modifiers = Modifiers::from(event.modifiers);
         let key = match event.code {
-            KeyCode::Char(c) => Key::Char(c),
+            KeyCode::Char(c) => {
+                // If shift is pressed and character is lowercase alphabetic,
+                // uppercase it. This handles terminals that don't support
+                // REPORT_ALTERNATE_KEYS properly (which would report 'A' directly).
+                let c = if modifiers.shift && c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                };
+                Key::Char(c)
+            }
             KeyCode::Backspace => Key::Backspace,
             KeyCode::Delete => Key::Delete,
             KeyCode::Enter => Key::Enter,

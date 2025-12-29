@@ -1,6 +1,6 @@
 use anyhow::Result;
 use arboard::Clipboard;
-use crossterm::event::{self, Event, KeyEvent, MouseEvent};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind, MouseEvent};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -811,7 +811,10 @@ impl Editor {
             // This balances responsiveness with CPU usage
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
-                    Event::Key(key_event) => self.process_key(key_event)?,
+                    // Only process key presses and repeats, not releases
+                    Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
+                        self.process_key(key_event)?
+                    }
                     Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
                     Event::Resize(cols, rows) => {
                         self.screen.cols = cols;
@@ -825,7 +828,10 @@ impl Editor {
                 // Process any additional queued events before rendering
                 while event::poll(Duration::from_millis(0))? {
                     match event::read()? {
-                        Event::Key(key_event) => self.process_key(key_event)?,
+                        // Only process key presses and repeats, not releases
+                        Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
+                            self.process_key(key_event)?
+                        }
                         Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
                         Event::Resize(cols, rows) => {
                             self.screen.cols = cols;
