@@ -626,6 +626,13 @@ impl Editor {
 
     pub fn open(&mut self, path: &str) -> Result<()> {
         let file_path = PathBuf::from(path);
+        let abs_path = file_path.canonicalize().unwrap_or_else(|_| file_path.clone());
+
+        // If path is a directory, use it as the workspace root
+        if abs_path.is_dir() {
+            self.workspace = Workspace::open(abs_path)?;
+            return Ok(());
+        }
 
         // If this is the initial open (empty default tab), use workspace detection
         let is_initial = self.workspace.tabs.len() == 1

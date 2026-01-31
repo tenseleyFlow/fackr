@@ -752,6 +752,11 @@ impl Workspace {
         let abs_path = file_path.canonicalize()
             .unwrap_or_else(|_| file_path.to_path_buf());
 
+        // If path is a directory, use it as the workspace root directly
+        if abs_path.is_dir() {
+            return Self::open(abs_path);
+        }
+
         // Determine workspace root
         let root = Self::detect_from_file(&abs_path)
             .or_else(|| abs_path.parent().map(|p| p.to_path_buf()))
@@ -804,8 +809,8 @@ impl Workspace {
                         self.root.join(path)
                     };
 
-                    // Only restore if file still exists
-                    if full_path.exists() {
+                    // Only restore if file still exists and is not a directory
+                    if full_path.exists() && !full_path.is_dir() {
                         match BufferEntry::from_file(&full_path, &self.root) {
                             Ok(entry) => {
                                 valid_buffer_map.push(Some(buffers.len()));
