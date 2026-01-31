@@ -1971,6 +1971,9 @@ impl Editor {
     }
 
     fn render(&mut self) -> Result<()> {
+        // Hide cursor at start of render pass to prevent flicker
+        self.screen.hide_cursor()?;
+
         // Calculate fuss pane width if active
         let fuss_width = if self.workspace.fuss.active {
             self.workspace.fuss.width(self.screen.cols)

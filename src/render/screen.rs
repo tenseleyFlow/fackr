@@ -5,7 +5,7 @@ use crossterm::{
         DisableMouseCapture, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
-    execute,
+    execute, queue,
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -153,25 +153,31 @@ impl Screen {
 
     /// Position and show the hardware cursor at the given screen coordinates
     pub fn show_cursor_at(&mut self, col: u16, row: u16) -> Result<()> {
-        execute!(self.stdout, MoveTo(col, row), Show)?;
+        queue!(self.stdout, MoveTo(col, row), Show)?;
         self.stdout.flush()?;
+        Ok(())
+    }
+
+    /// Hide the hardware cursor (call at start of render pass)
+    pub fn hide_cursor(&mut self) -> Result<()> {
+        queue!(self.stdout, Hide)?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub fn clear(&mut self) -> Result<()> {
-        execute!(self.stdout, Clear(ClearType::All))?;
+        queue!(self.stdout, Clear(ClearType::All))?;
         Ok(())
     }
 
     /// Render the tab bar
     /// Returns the height of the tab bar (always 1)
     pub fn render_tab_bar(&mut self, tabs: &[TabInfo], left_offset: u16) -> Result<u16> {
-        execute!(self.stdout, MoveTo(left_offset, 0))?;
+        queue!(self.stdout, MoveTo(left_offset, 0))?;
 
         // Fill the tab bar background
         let available_width = self.cols.saturating_sub(left_offset) as usize;
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(TAB_BAR_BG),
             SetForegroundColor(TAB_INACTIVE_FG),
@@ -214,7 +220,7 @@ impl Screen {
                 (TAB_BAR_BG, TAB_INACTIVE_FG)
             };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(current_col as u16, 0),
                 SetBackgroundColor(bg),
@@ -222,7 +228,7 @@ impl Screen {
 
             // Print index number (for Alt+N shortcut hint)
             if !index_str.is_empty() {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(LINE_NUM_COLOR),
                     Print(&index_str),
@@ -231,7 +237,7 @@ impl Screen {
             }
 
             // Print tab name
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(fg),
                 Print(&display_name),
@@ -239,7 +245,7 @@ impl Screen {
 
             // Print modified indicator
             if tab.is_modified {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(TAB_MODIFIED_FG),
                     Print(modified_str),
@@ -250,7 +256,7 @@ impl Screen {
 
             // Add separator between tabs
             if i + 1 < tab_count {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(TAB_BAR_BG),
                     SetForegroundColor(LINE_NUM_COLOR),
@@ -261,7 +267,7 @@ impl Screen {
         }
 
         // Fill the rest of the line
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(TAB_BAR_BG),
             Clear(ClearType::UntilNewLine),
@@ -281,8 +287,6 @@ impl Screen {
         left_offset: u16,
         top_offset: u16,
     ) -> Result<()> {
-        execute!(self.stdout, Hide)?;
-
         // Calculate available screen area
         let available_width = self.cols.saturating_sub(left_offset) as f32;
         let available_height = self.rows.saturating_sub(2 + top_offset) as f32; // -2 for gap + status bar
@@ -316,7 +320,7 @@ impl Screen {
                 let sep_x = pane_x.saturating_sub(1);
                 let sep_color = if pane.is_active { PANE_ACTIVE_SEPARATOR_FG } else { PANE_SEPARATOR_FG };
                 for row in 0..pane_height {
-                    execute!(
+                    queue!(
                         self.stdout,
                         MoveTo(sep_x, pane_y + row),
                         SetBackgroundColor(BG_COLOR),
@@ -331,7 +335,7 @@ impl Screen {
                 let sep_y = pane_y.saturating_sub(1);
                 let sep_color = if pane.is_active { PANE_ACTIVE_SEPARATOR_FG } else { PANE_SEPARATOR_FG };
                 for col in 0..pane_width {
-                    execute!(
+                    queue!(
                         self.stdout,
                         MoveTo(pane_x + col, sep_y),
                         SetBackgroundColor(BG_COLOR),
@@ -344,7 +348,7 @@ impl Screen {
 
         // Render the gap row (empty line between text and status bar)
         let gap_row = top_offset + available_height as u16;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(left_offset, gap_row),
             SetBackgroundColor(BG_COLOR),
@@ -363,12 +367,11 @@ impl Screen {
             )?;
         }
 
-        // Position hardware cursor
+        // Position hardware cursor (but don't show - caller handles that)
         if let Some((col, row)) = cursor_screen_pos {
-            execute!(self.stdout, MoveTo(col, row), Show)?;
+            queue!(self.stdout, MoveTo(col, row))?;
         }
 
-        self.stdout.flush()?;
         Ok(())
     }
 
@@ -423,7 +426,7 @@ impl Screen {
         for row in 0..height as usize {
             let line_idx = pane.viewport_line + row;
             let is_current_line = line_idx == primary.line;
-            execute!(self.stdout, MoveTo(x, y + row as u16))?;
+            queue!(self.stdout, MoveTo(x, y + row as u16))?;
 
             if line_idx < buffer.line_count() {
                 let line_num_fg = if is_current_line {
@@ -433,7 +436,7 @@ impl Screen {
                 };
                 let line_bg = if is_current_line { current_line_bg } else { bg_color };
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     SetForegroundColor(line_num_fg),
@@ -464,7 +467,7 @@ impl Screen {
                     } else {
                         // Inactive pane: simple dimmed text
                         let chars: String = line.chars().take(text_cols).collect();
-                        execute!(
+                        queue!(
                             self.stdout,
                             SetBackgroundColor(line_bg),
                             SetForegroundColor(text_color),
@@ -474,7 +477,7 @@ impl Screen {
                 }
 
                 // Fill rest of pane width
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                 )?;
@@ -482,11 +485,11 @@ impl Screen {
                 let current_col = x + line_num_width as u16 + 1 + text_cols.min(line_len) as u16;
                 let remaining = (x + width).saturating_sub(current_col);
                 if remaining > 0 {
-                    execute!(self.stdout, Print(" ".repeat(remaining as usize)))?;
+                    queue!(self.stdout, Print(" ".repeat(remaining as usize)))?;
                 }
-                execute!(self.stdout, ResetColor)?;
+                queue!(self.stdout, ResetColor)?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(bg_color),
                     SetForegroundColor(if is_active { Color::DarkBlue } else { INACTIVE_LINE_NUM_COLOR }),
@@ -494,7 +497,7 @@ impl Screen {
                 )?;
                 // Fill rest of line within pane bounds
                 let remaining = width.saturating_sub(line_num_width as u16 + 1);
-                execute!(self.stdout, Print(" ".repeat(remaining as usize)), ResetColor)?;
+                queue!(self.stdout, Print(" ".repeat(remaining as usize)), ResetColor)?;
             }
         }
 
@@ -545,9 +548,6 @@ impl Screen {
         message: Option<&str>,
         bracket_match: Option<(usize, usize)>,
     ) -> Result<()> {
-        // Hide cursor during render to prevent flicker
-        execute!(self.stdout, Hide)?;
-
         let line_num_width = self.line_number_width(buffer.line_count());
         let text_cols = self.cols as usize - line_num_width - 1;
 
@@ -575,7 +575,7 @@ impl Screen {
         for row in 0..text_rows {
             let line_idx = viewport_line + row;
             let is_current_line = line_idx == primary.line;
-            execute!(self.stdout, MoveTo(0, row as u16))?;
+            queue!(self.stdout, MoveTo(0, row as u16))?;
 
             if line_idx < buffer.line_count() {
                 // Line number with appropriate color
@@ -586,7 +586,7 @@ impl Screen {
                 };
                 let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     SetForegroundColor(line_num_fg),
@@ -618,7 +618,7 @@ impl Screen {
                 }
 
                 // Fill rest of line with background color
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     Clear(ClearType::UntilNewLine),
@@ -626,7 +626,7 @@ impl Screen {
                 )?;
             } else {
                 // Empty line indicator
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(BG_COLOR),
                     SetForegroundColor(Color::DarkBlue),
@@ -639,7 +639,7 @@ impl Screen {
 
         // Render the gap row (empty line between text and status bar)
         let gap_row = text_rows as u16;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(0, gap_row),
             SetBackgroundColor(BG_COLOR),
@@ -650,16 +650,14 @@ impl Screen {
         // Status bar
         self.render_status_bar(buffer, cursors, filename, message)?;
 
-        // Position hardware cursor at primary cursor
+        // Position hardware cursor at primary cursor (but don't show - caller handles that)
         let cursor_row = primary.line.saturating_sub(viewport_line);
         let cursor_col = line_num_width + 1 + primary.col;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(cursor_col as u16, cursor_row as u16),
-            Show
         )?;
 
-        self.stdout.flush()?;
         Ok(())
     }
 
@@ -774,7 +772,7 @@ impl Screen {
 
             // Apply styling
             if bold {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(bg),
                     SetForegroundColor(fg),
@@ -783,7 +781,7 @@ impl Screen {
                     SetAttribute(Attribute::NoBold),
                 )?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(bg),
                     SetForegroundColor(fg),
@@ -793,7 +791,7 @@ impl Screen {
         }
 
         // Reset to line background for rest of line
-        execute!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
+        queue!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
 
         // Handle secondary cursors at end of line (past text content)
         let max_cursor_past_text = secondary_cursors.iter()
@@ -805,21 +803,21 @@ impl Screen {
             if max_cursor < max_cols {
                 for col in char_count..=max_cursor {
                     if secondary_cursors.contains(&col) {
-                        execute!(
+                        queue!(
                             self.stdout,
                             SetBackgroundColor(Color::Magenta),
                             SetForegroundColor(Color::White),
                             Print(" ")
                         )?;
                     } else {
-                        execute!(
+                        queue!(
                             self.stdout,
                             SetBackgroundColor(line_bg),
                             Print(" ")
                         )?;
                     }
                 }
-                execute!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
+                queue!(self.stdout, SetBackgroundColor(line_bg), SetForegroundColor(default_fg))?;
             }
         }
 
@@ -835,10 +833,10 @@ impl Screen {
         message: Option<&str>,
     ) -> Result<()> {
         let status_row = self.rows.saturating_sub(1);
-        execute!(self.stdout, MoveTo(0, status_row))?;
+        queue!(self.stdout, MoveTo(0, status_row))?;
 
         // Status bar background
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(Color::DarkGrey),
             SetForegroundColor(Color::White)
@@ -867,7 +865,7 @@ impl Screen {
         let padding = (self.cols as usize).saturating_sub(left.len() + right.len());
         let middle = " ".repeat(padding);
 
-        execute!(
+        queue!(
             self.stdout,
             Print(&left),
             Print(&middle),
@@ -907,7 +905,7 @@ impl Screen {
         let tree_rows = text_rows.saturating_sub(hint_rows + header_rows);
 
         // Draw header: repo_name:branch
-        execute!(self.stdout, MoveTo(0, 0))?;
+        queue!(self.stdout, MoveTo(0, 0))?;
         let header_text = if let Some(b) = branch {
             format!("{}:{}", repo_name, b)
         } else {
@@ -917,15 +915,15 @@ impl Screen {
         let padded = format!("{:<width$}", truncated, width = width);
 
         // Render header with cyan repo name, yellow branch
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(BG_COLOR),
             SetForegroundColor(Color::Cyan),
         )?;
         if let Some(b) = branch {
             let repo_display: String = repo_name.chars().take(width.saturating_sub(1)).collect();
-            execute!(self.stdout, Print(&repo_display))?;
-            execute!(
+            queue!(self.stdout, Print(&repo_display))?;
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::DarkGrey),
                 Print(":"),
@@ -934,16 +932,16 @@ impl Screen {
             let remaining = width.saturating_sub(repo_display.len() + 1);
             let branch_display: String = b.chars().take(remaining).collect();
             let branch_padded = format!("{:<width$}", branch_display, width = remaining);
-            execute!(self.stdout, Print(&branch_padded))?;
+            queue!(self.stdout, Print(&branch_padded))?;
         } else {
-            execute!(self.stdout, Print(&padded))?;
+            queue!(self.stdout, Print(&padded))?;
         }
-        execute!(self.stdout, ResetColor)?;
+        queue!(self.stdout, ResetColor)?;
 
         // Draw separator
-        execute!(self.stdout, MoveTo(0, 1))?;
+        queue!(self.stdout, MoveTo(0, 1))?;
         let separator = "─".repeat(width);
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(BG_COLOR),
             SetForegroundColor(Color::DarkGrey),
@@ -954,10 +952,10 @@ impl Screen {
         // Draw git mode indicator line
         if git_mode {
             let git_row = 2u16;
-            execute!(self.stdout, MoveTo(0, git_row))?;
+            queue!(self.stdout, MoveTo(0, git_row))?;
             let git_hint = "Git: a/u/d/m/p/l/f/t";
             let padded = format!("{:<width$}", git_hint, width = width);
-            execute!(
+            queue!(
                 self.stdout,
                 SetBackgroundColor(Color::AnsiValue(235)),
                 SetForegroundColor(Color::Yellow),
@@ -969,7 +967,7 @@ impl Screen {
         // Draw file tree (starting after header)
         for row in 0..tree_rows {
             let screen_row = (row + header_rows) as u16;
-            execute!(self.stdout, MoveTo(0, screen_row))?;
+            queue!(self.stdout, MoveTo(0, screen_row))?;
 
             let item_idx = scroll + row;
             if item_idx < items.len() {
@@ -1010,7 +1008,7 @@ impl Screen {
                     // Highlight selected - need to handle git indicator specially
                     let padded_len = width.saturating_sub(indicator_display_len);
                     let padded = format!("{:<width$}", display_base, width = padded_len);
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(Color::DarkGrey),
                         SetForegroundColor(Color::White),
@@ -1019,21 +1017,21 @@ impl Screen {
                     if !git_indicator.is_empty() {
                         // Git indicator with selection background
                         if item.git_status.staged {
-                            execute!(self.stdout, SetForegroundColor(Color::Green), Print(" ↑"))?;
+                            queue!(self.stdout, SetForegroundColor(Color::Green), Print(" ↑"))?;
                         } else if item.git_status.unstaged {
-                            execute!(self.stdout, SetForegroundColor(Color::Red), Print(" ✗"))?;
+                            queue!(self.stdout, SetForegroundColor(Color::Red), Print(" ✗"))?;
                         } else if item.git_status.untracked {
-                            execute!(self.stdout, SetForegroundColor(Color::DarkGrey), Print(" ?"))?;
+                            queue!(self.stdout, SetForegroundColor(Color::DarkGrey), Print(" ?"))?;
                         } else if item.git_status.incoming {
-                            execute!(self.stdout, SetForegroundColor(Color::Blue), Print(" ↓"))?;
+                            queue!(self.stdout, SetForegroundColor(Color::Blue), Print(" ↓"))?;
                         }
                     }
-                    execute!(self.stdout, ResetColor)?;
+                    queue!(self.stdout, ResetColor)?;
                 } else if item.is_dir {
                     // Directories in blue
                     let padded_len = width.saturating_sub(indicator_display_len);
                     let padded = format!("{:<width$}", display_base, width = padded_len);
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(BG_COLOR),
                         SetForegroundColor(Color::Blue),
@@ -1043,7 +1041,7 @@ impl Screen {
                 } else if item.git_status.gitignored {
                     // Gitignored files in dark gray
                     let padded = format!("{:<width$}", display_base, width = width);
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(BG_COLOR),
                         SetForegroundColor(Color::DarkGrey),
@@ -1054,7 +1052,7 @@ impl Screen {
                     // Files in default color with git status
                     let padded_len = width.saturating_sub(indicator_display_len);
                     let padded = format!("{:<width$}", display_base, width = padded_len);
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(BG_COLOR),
                         SetForegroundColor(Color::Reset),
@@ -1062,20 +1060,20 @@ impl Screen {
                     )?;
                     // Add git status indicator
                     if item.git_status.staged {
-                        execute!(self.stdout, SetForegroundColor(Color::Green), Print(" ↑"))?;
+                        queue!(self.stdout, SetForegroundColor(Color::Green), Print(" ↑"))?;
                     } else if item.git_status.unstaged {
-                        execute!(self.stdout, SetForegroundColor(Color::Red), Print(" ✗"))?;
+                        queue!(self.stdout, SetForegroundColor(Color::Red), Print(" ✗"))?;
                     } else if item.git_status.untracked {
-                        execute!(self.stdout, SetForegroundColor(Color::DarkGrey), Print(" ?"))?;
+                        queue!(self.stdout, SetForegroundColor(Color::DarkGrey), Print(" ?"))?;
                     } else if item.git_status.incoming {
-                        execute!(self.stdout, SetForegroundColor(Color::Blue), Print(" ↓"))?;
+                        queue!(self.stdout, SetForegroundColor(Color::Blue), Print(" ↓"))?;
                     }
-                    execute!(self.stdout, ResetColor)?;
+                    queue!(self.stdout, ResetColor)?;
                 }
             } else {
                 // Empty row
                 let empty = " ".repeat(width);
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(BG_COLOR),
                     Print(&empty),
@@ -1095,9 +1093,9 @@ impl Screen {
             ];
             for (i, hint) in hints.iter().enumerate() {
                 if hint_start + i < text_rows {
-                    execute!(self.stdout, MoveTo(0, (hint_start + i) as u16))?;
+                    queue!(self.stdout, MoveTo(0, (hint_start + i) as u16))?;
                     let padded = format!("{:<width$}", hint, width = width);
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(BG_COLOR),
                         SetForegroundColor(Color::DarkGrey),
@@ -1108,10 +1106,10 @@ impl Screen {
             }
         } else {
             if hint_start < text_rows {
-                execute!(self.stdout, MoveTo(0, hint_start as u16))?;
+                queue!(self.stdout, MoveTo(0, hint_start as u16))?;
                 let hint = "ctrl-/:hints";
                 let padded = format!("{:<width$}", hint, width = width);
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(BG_COLOR),
                     SetForegroundColor(Color::DarkGrey),
@@ -1123,9 +1121,9 @@ impl Screen {
 
         // Fill the status bar row for fuss mode column (prevents terminal bleed-through)
         let status_row = self.rows.saturating_sub(1);
-        execute!(self.stdout, MoveTo(0, status_row))?;
+        queue!(self.stdout, MoveTo(0, status_row))?;
         let status_fill = " ".repeat(width);
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(BG_COLOR),
             Print(&status_fill),
@@ -1149,9 +1147,6 @@ impl Screen {
         top_offset: u16,
         is_modified: bool,
     ) -> Result<()> {
-        // Hide cursor during render to prevent flicker
-        execute!(self.stdout, Hide)?;
-
         let available_cols = self.cols.saturating_sub(left_offset) as usize;
         let line_num_width = self.line_number_width(buffer.line_count());
         let text_cols = available_cols.saturating_sub(line_num_width + 1);
@@ -1180,7 +1175,7 @@ impl Screen {
         for row in 0..text_rows {
             let line_idx = viewport_line + row;
             let is_current_line = line_idx == primary.line;
-            execute!(self.stdout, MoveTo(left_offset, (row as u16) + top_offset))?;
+            queue!(self.stdout, MoveTo(left_offset, (row as u16) + top_offset))?;
 
             if line_idx < buffer.line_count() {
                 let line_num_fg = if is_current_line {
@@ -1190,7 +1185,7 @@ impl Screen {
                 };
                 let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     SetForegroundColor(line_num_fg),
@@ -1218,14 +1213,14 @@ impl Screen {
                     )?;
                 }
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     Clear(ClearType::UntilNewLine),
                     ResetColor
                 )?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(BG_COLOR),
                     SetForegroundColor(Color::DarkBlue),
@@ -1238,7 +1233,7 @@ impl Screen {
 
         // Render the gap row (empty line between text and status bar)
         let gap_row = text_rows as u16 + top_offset;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(left_offset, gap_row),
             SetBackgroundColor(BG_COLOR),
@@ -1249,16 +1244,14 @@ impl Screen {
         // Status bar
         self.render_status_bar_with_offset(cursors, filename, message, left_offset, is_modified)?;
 
-        // Position hardware cursor at primary cursor
+        // Position hardware cursor at primary cursor (but don't show - caller handles that)
         let cursor_row = (primary.line.saturating_sub(viewport_line) as u16) + top_offset;
         let cursor_col = left_offset as usize + line_num_width + 1 + primary.col;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(cursor_col as u16, cursor_row),
-            Show
         )?;
 
-        self.stdout.flush()?;
         Ok(())
     }
 
@@ -1278,8 +1271,6 @@ impl Screen {
         highlighter: &mut Highlighter,
         ghost_text: Option<&str>,
     ) -> Result<()> {
-        execute!(self.stdout, Hide)?;
-
         let available_cols = self.cols.saturating_sub(left_offset) as usize;
         let line_num_width = self.line_number_width(buffer.line_count());
         let text_cols = available_cols.saturating_sub(line_num_width + 1);
@@ -1327,7 +1318,7 @@ impl Screen {
         for row in 0..text_rows {
             let line_idx = viewport_line + row;
             let is_current_line = line_idx == primary.line;
-            execute!(self.stdout, MoveTo(left_offset, (row as u16) + top_offset))?;
+            queue!(self.stdout, MoveTo(left_offset, (row as u16) + top_offset))?;
 
             if line_idx < buffer.line_count() {
                 let line_num_fg = if is_current_line {
@@ -1337,7 +1328,7 @@ impl Screen {
                 };
                 let line_bg = if is_current_line { CURRENT_LINE_BG } else { BG_COLOR };
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     SetForegroundColor(line_num_fg),
@@ -1400,7 +1391,7 @@ impl Screen {
                             if remaining_cols > 0 {
                                 // Truncate ghost text if it doesn't fit
                                 let ghost_display: String = ghost.chars().take(remaining_cols).collect();
-                                execute!(
+                                queue!(
                                     self.stdout,
                                     SetBackgroundColor(line_bg),
                                     SetForegroundColor(Color::AnsiValue(240)), // Dim gray
@@ -1411,14 +1402,14 @@ impl Screen {
                     }
                 }
 
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(line_bg),
                     Clear(ClearType::UntilNewLine),
                     ResetColor
                 )?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(BG_COLOR),
                     SetForegroundColor(Color::DarkBlue),
@@ -1431,7 +1422,7 @@ impl Screen {
 
         // Render the gap row (empty line between text and status bar)
         let gap_row = text_rows as u16 + top_offset;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(left_offset, gap_row),
             SetBackgroundColor(BG_COLOR),
@@ -1442,16 +1433,14 @@ impl Screen {
         // Status bar
         self.render_status_bar_with_offset(cursors, filename, message, left_offset, is_modified)?;
 
-        // Position hardware cursor (adjusted for horizontal scroll)
+        // Position hardware cursor (adjusted for horizontal scroll, but don't show - caller handles that)
         let cursor_row = (primary.line.saturating_sub(viewport_line) as u16) + top_offset;
         let cursor_col = left_offset as usize + line_num_width + 1 + primary.col.saturating_sub(viewport_col);
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(cursor_col as u16, cursor_row),
-            Show
         )?;
 
-        self.stdout.flush()?;
         Ok(())
     }
 
@@ -1465,9 +1454,9 @@ impl Screen {
     ) -> Result<()> {
         let status_row = self.rows.saturating_sub(1);
         let available_cols = self.cols.saturating_sub(offset) as usize;
-        execute!(self.stdout, MoveTo(offset, status_row))?;
+        queue!(self.stdout, MoveTo(offset, status_row))?;
 
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(Color::DarkGrey),
             SetForegroundColor(Color::White)
@@ -1493,7 +1482,7 @@ impl Screen {
         let padding = available_cols.saturating_sub(left.len() + right.len());
         let middle = " ".repeat(padding);
 
-        execute!(
+        queue!(
             self.stdout,
             Print(&left),
             Print(&middle),
@@ -1510,14 +1499,14 @@ impl Screen {
         items: &[(String, String, bool, bool)], // (label, path, is_selected, is_current_dir)
         scroll: usize,
     ) -> Result<()> {
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         let cols = self.cols as usize;
         let rows = self.rows as usize;
 
         // Fill background
         for row in 0..rows {
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(0, row as u16),
                 SetBackgroundColor(BG_COLOR),
@@ -1535,7 +1524,7 @@ impl Screen {
         let top_border = format!("╭{}╮", "─".repeat(box_width.saturating_sub(2)));
         let bottom_border = format!("╰{}╯", "─".repeat(box_width.saturating_sub(2)));
 
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, box_y as u16),
             SetBackgroundColor(BG_COLOR),
@@ -1547,7 +1536,7 @@ impl Screen {
         let title = "Welcome to fackr";
         let title_row = box_y + 1;
         let title_x = box_x + (box_width.saturating_sub(title.len())) / 2;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, title_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1556,7 +1545,7 @@ impl Screen {
         )?;
         let padding_left = title_x.saturating_sub(box_x + 1);
         let padding_right = box_width.saturating_sub(2).saturating_sub(padding_left + title.len());
-        execute!(
+        queue!(
             self.stdout,
             Print(&" ".repeat(padding_left)),
             Print(title),
@@ -1568,7 +1557,7 @@ impl Screen {
         // Subtitle
         let subtitle = "Select a workspace:";
         let subtitle_row = box_y + 2;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, subtitle_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1577,7 +1566,7 @@ impl Screen {
         )?;
         let padding_left = (box_width.saturating_sub(2).saturating_sub(subtitle.len())) / 2;
         let padding_right = box_width.saturating_sub(2).saturating_sub(padding_left + subtitle.len());
-        execute!(
+        queue!(
             self.stdout,
             Print(&" ".repeat(padding_left)),
             Print(subtitle),
@@ -1588,7 +1577,7 @@ impl Screen {
 
         // Separator
         let separator_row = box_y + 3;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, separator_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1606,7 +1595,7 @@ impl Screen {
             let row = list_start_row + i;
             let item_idx = scroll + i;
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(box_x as u16, row as u16),
                 SetForegroundColor(Color::DarkGrey),
@@ -1621,7 +1610,7 @@ impl Screen {
                 let padded = format!("{:<width$}", display_label, width = inner_width);
 
                 if *is_selected {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(Color::DarkGrey),
                         SetForegroundColor(Color::White),
@@ -1629,13 +1618,13 @@ impl Screen {
                         SetBackgroundColor(BG_COLOR),
                     )?;
                 } else if *is_current_dir {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetForegroundColor(Color::Cyan),
                         Print(&padded),
                     )?;
                 } else {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetForegroundColor(Color::Reset),
                         Print(&padded),
@@ -1647,14 +1636,14 @@ impl Screen {
                     // Clear and show path below
                 }
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(Color::Reset),
                     Print(&" ".repeat(inner_width)),
                 )?;
             }
 
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::DarkGrey),
                 Print(" │"),
@@ -1663,7 +1652,7 @@ impl Screen {
 
         // Path display row (show selected path)
         let path_row = list_start_row + list_height;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, path_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1675,7 +1664,7 @@ impl Screen {
         // Show selected path
         let selected_item = items.iter().find(|(_, _, sel, _)| *sel);
         let path_display_row = path_row + 1;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, path_display_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1684,18 +1673,18 @@ impl Screen {
         if let Some((_, path, _, _)) = selected_item {
             let truncated_path: String = path.chars().take(inner_width).collect();
             let padded_path = format!("{:<width$}", truncated_path, width = inner_width);
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::AnsiValue(240)),
                 Print(&padded_path),
             )?;
         } else {
-            execute!(
+            queue!(
                 self.stdout,
                 Print(&" ".repeat(inner_width)),
             )?;
         }
-        execute!(
+        queue!(
             self.stdout,
             SetForegroundColor(Color::DarkGrey),
             Print(" │"),
@@ -1703,7 +1692,7 @@ impl Screen {
 
         // Bottom border
         let bottom_row = path_display_row + 1;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(box_x as u16, bottom_row as u16),
             SetForegroundColor(Color::DarkGrey),
@@ -1714,7 +1703,7 @@ impl Screen {
         let hint_row = bottom_row + 1;
         let hints = "↑/↓: navigate  Enter: select  ESC: quit";
         let hints_x = (cols.saturating_sub(hints.len())) / 2;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(hints_x as u16, hint_row as u16),
             SetForegroundColor(Color::AnsiValue(240)),
@@ -1769,7 +1758,7 @@ impl Screen {
             let is_selected = i + scroll_offset == selected_index;
             let bg = if is_selected { selected_bg } else { popup_bg };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(popup_col, row),
                 SetBackgroundColor(bg),
@@ -1792,7 +1781,7 @@ impl Screen {
             write!(self.stdout, "{:<width$}", truncated_label, width = label_width - detail.len().min(15))?;
 
             if !detail.is_empty() {
-                execute!(self.stdout, SetForegroundColor(detail_fg))?;
+                queue!(self.stdout, SetForegroundColor(detail_fg))?;
                 let truncated_detail: String = if detail.len() > 12 {
                     format!("{}...", &detail[..9])
                 } else {
@@ -1802,13 +1791,13 @@ impl Screen {
             }
 
             // Clear to popup width
-            execute!(self.stdout, ResetColor)?;
+            queue!(self.stdout, ResetColor)?;
         }
 
         // Show scroll indicator if needed
         if completions.len() > max_items {
             let indicator_row = popup_row + max_items as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(popup_col, indicator_row),
                 SetBackgroundColor(popup_bg),
@@ -1849,7 +1838,7 @@ impl Screen {
                 };
 
                 // Draw indicator at the start of the line (before line number)
-                execute!(
+                queue!(
                     self.stdout,
                     MoveTo(left_offset, row),
                     SetForegroundColor(color),
@@ -1910,7 +1899,7 @@ impl Screen {
             let row = popup_row + i as u16;
 
             // Background and border
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(popup_col, row),
                 SetBackgroundColor(Color::AnsiValue(238)),
@@ -1924,13 +1913,13 @@ impl Screen {
                 format!(" {:width$} ", line, width = popup_width)
             };
 
-            execute!(self.stdout, Print(&display_line), ResetColor)?;
+            queue!(self.stdout, Print(&display_line), ResetColor)?;
         }
 
         // Show indicator if content is truncated
         if lines.len() > popup_height {
             let row = popup_row + popup_height as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(popup_col, row),
                 SetBackgroundColor(Color::AnsiValue(238)),
@@ -1969,7 +1958,7 @@ impl Screen {
         let input_bg = Color::AnsiValue(238);
 
         // Draw top border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16),
             SetBackgroundColor(bg),
@@ -1979,7 +1968,7 @@ impl Screen {
 
         // Draw title row
         let title_padding = (modal_width - 2 - title.len()) / 2;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16 + 1),
             SetBackgroundColor(bg),
@@ -1992,7 +1981,7 @@ impl Screen {
         )?;
 
         // Draw separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16 + 2),
             SetBackgroundColor(bg),
@@ -2001,7 +1990,7 @@ impl Screen {
         )?;
 
         // Draw "From:" row
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16 + 3),
             SetBackgroundColor(bg),
@@ -2017,7 +2006,7 @@ impl Screen {
 
         // Draw "To:" row with input field
         let input_width = modal_width - 4 - to_label.len();
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16 + 4),
             SetBackgroundColor(bg),
@@ -2034,7 +2023,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16 + 5),
             SetBackgroundColor(bg),
@@ -2045,12 +2034,13 @@ impl Screen {
 
         // Position cursor in the input field
         let cursor_col = start_col + 2 + to_label.len() + new_name.len();
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(cursor_col as u16, start_row as u16 + 4),
             SetBackgroundColor(input_bg),
             crossterm::cursor::Show,
         )?;
+        self.stdout.flush()?;
 
         Ok(())
     }
@@ -2070,7 +2060,7 @@ impl Screen {
         let status_row = self.rows.saturating_sub(1);
         let available_cols = (self.cols.saturating_sub(left_offset)) as usize;
 
-        execute!(self.stdout, MoveTo(left_offset, status_row))?;
+        queue!(self.stdout, MoveTo(left_offset, status_row))?;
 
         // Colors
         let bg = Color::DarkGrey;
@@ -2090,13 +2080,13 @@ impl Screen {
         let input_width = input_width.max(10).min(40);
 
         // Start with background
-        execute!(self.stdout, SetBackgroundColor(bg))?;
+        queue!(self.stdout, SetBackgroundColor(bg))?;
 
         // Find label and input
         let find_bg = if active_field { active_bg } else { inactive_bg };
         let find_label_color = if active_field { active_label } else { label_color };
 
-        execute!(
+        queue!(
             self.stdout,
             SetForegroundColor(find_label_color),
             Print(find_label),
@@ -2110,13 +2100,13 @@ impl Screen {
         } else {
             format!("{:<width$}", find_query, width = input_width)
         };
-        execute!(self.stdout, Print(&find_display))?;
+        queue!(self.stdout, Print(&find_display))?;
 
         // Replace label and input
         let replace_bg = if !active_field { active_bg } else { inactive_bg };
         let replace_label_color = if !active_field { active_label } else { label_color };
 
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(bg),
             SetForegroundColor(replace_label_color),
@@ -2131,14 +2121,14 @@ impl Screen {
         } else {
             format!("{:<width$}", replace_text, width = input_width)
         };
-        execute!(self.stdout, Print(&replace_display))?;
+        queue!(self.stdout, Print(&replace_display))?;
 
         // Toggle buttons
-        execute!(self.stdout, SetBackgroundColor(bg))?;
+        queue!(self.stdout, SetBackgroundColor(bg))?;
 
         // Regex toggle [.*]
         let regex_color = if regex_mode { toggle_on } else { toggle_off };
-        execute!(
+        queue!(
             self.stdout,
             Print(" "),
             SetForegroundColor(regex_color),
@@ -2147,7 +2137,7 @@ impl Screen {
 
         // Case sensitivity toggle [Aa]
         let case_color = if case_insensitive { toggle_on } else { toggle_off };
-        execute!(
+        queue!(
             self.stdout,
             Print(" "),
             SetForegroundColor(case_color),
@@ -2155,14 +2145,14 @@ impl Screen {
         )?;
 
         // Match count
-        execute!(self.stdout, SetForegroundColor(label_color))?;
+        queue!(self.stdout, SetForegroundColor(label_color))?;
         if match_count > 0 {
-            execute!(
+            queue!(
                 self.stdout,
                 Print(format!(" {}/{}", current_match + 1, match_count)),
             )?;
         } else if !find_query.is_empty() {
-            execute!(self.stdout, Print(" No matches"))?;
+            queue!(self.stdout, Print(" No matches"))?;
         }
 
         // Fill remaining space
@@ -2171,7 +2161,7 @@ impl Screen {
             else if !find_query.is_empty() { 11 }
             else { 0 };
         let remaining = available_cols.saturating_sub(used);
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(remaining)),
             ResetColor,
@@ -2183,11 +2173,12 @@ impl Screen {
         } else {
             left_offset as usize + find_label.len() + input_width + replace_label.len() + replace_text.len().min(input_width)
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(cursor_col as u16, status_row),
             crossterm::cursor::Show,
         )?;
+        self.stdout.flush()?;
 
         Ok(())
     }
@@ -2237,7 +2228,7 @@ impl Screen {
             path_str.to_string()
         };
         let title = format!(" {} ", display_path);
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16),
             SetBackgroundColor(bg),
@@ -2251,7 +2242,7 @@ impl Screen {
         )?;
 
         // Draw filter input row
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 1) as u16),
             SetBackgroundColor(bg),
@@ -2269,7 +2260,7 @@ impl Screen {
         )?;
 
         // Draw separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 2) as u16),
             SetBackgroundColor(bg),
@@ -2307,7 +2298,7 @@ impl Screen {
                 name.clone()
             };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(item_bg),
@@ -2326,7 +2317,7 @@ impl Screen {
         let items_drawn = filtered.len().saturating_sub(scroll).min(visible_rows);
         for i in items_drawn..visible_rows {
             let row = (start_row + 3 + i) as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(bg),
@@ -2339,7 +2330,7 @@ impl Screen {
         // Draw help text row
         let help_row = (start_row + 3 + visible_rows) as u16;
         let help_text = "←:up  →/Enter:open  ↑↓:nav  Esc:close";
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row),
             SetBackgroundColor(bg),
@@ -2353,7 +2344,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row + 1),
             SetBackgroundColor(bg),
@@ -2363,7 +2354,7 @@ impl Screen {
         )?;
 
         // Hide cursor when in fortress modal
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         self.stdout.flush()?;
         Ok(())
@@ -2398,7 +2389,7 @@ impl Screen {
 
         // Draw top border with title
         let title = " Search in Files (F4) ";
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16),
             SetBackgroundColor(bg),
@@ -2422,7 +2413,7 @@ impl Screen {
             "Type query, press Enter"
         };
         let input_width = modal_width.saturating_sub(14 + status.len());
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 1) as u16),
             SetBackgroundColor(bg),
@@ -2447,7 +2438,7 @@ impl Screen {
         } else {
             format!(" {} results ", results.len())
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 2) as u16),
             SetBackgroundColor(bg),
@@ -2501,7 +2492,7 @@ impl Screen {
                 content.clone()
             };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(item_bg),
@@ -2521,7 +2512,7 @@ impl Screen {
             // Calculate remaining width and print content with padding
             let used = display_path.len() + 1 + line_str.len() + 2 + 2;
             let remaining = modal_width.saturating_sub(used + 2);
-            execute!(
+            queue!(
                 self.stdout,
                 Print(format!("{:<width$}", display_content, width = remaining)),
                 SetForegroundColor(border_color),
@@ -2534,7 +2525,7 @@ impl Screen {
         let items_drawn = results.len().saturating_sub(scroll).min(visible_rows);
         for i in items_drawn..visible_rows {
             let row = (start_row + 3 + i) as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(bg),
@@ -2547,7 +2538,7 @@ impl Screen {
         // Draw help text row
         let help_row = (start_row + 3 + visible_rows) as u16;
         let help_text = "Enter:search/open  ↑↓:nav  PgUp/Dn:scroll  Esc:close";
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row),
             SetBackgroundColor(bg),
@@ -2561,7 +2552,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row + 1),
             SetBackgroundColor(bg),
@@ -2571,7 +2562,7 @@ impl Screen {
         )?;
 
         // Hide cursor when in modal
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         self.stdout.flush()?;
         Ok(())
@@ -2606,7 +2597,7 @@ impl Screen {
         let prompt_color = Color::Yellow;
 
         // Draw top border with subtle styling
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16),
             SetBackgroundColor(bg),
@@ -2618,7 +2609,7 @@ impl Screen {
         // Draw search input row with > prefix
         let display_query = if query.is_empty() { "" } else { query };
         let input_display_width = modal_width.saturating_sub(6);
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 1) as u16),
             SetBackgroundColor(bg),
@@ -2638,7 +2629,7 @@ impl Screen {
         )?;
 
         // Draw separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 2) as u16),
             SetBackgroundColor(bg),
@@ -2684,7 +2675,7 @@ impl Screen {
                 name.clone()
             };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(item_bg),
@@ -2697,7 +2688,7 @@ impl Screen {
 
             // Print name with padding
             let name_padding = name_width.saturating_sub(display_name.len());
-            execute!(
+            queue!(
                 self.stdout,
                 Print(&display_name),
                 Print(format!("{:width$}", "", width = name_padding)),
@@ -2713,7 +2704,7 @@ impl Screen {
         let items_drawn = commands.len().saturating_sub(scroll).min(visible_rows);
         for i in items_drawn..visible_rows {
             let row = (start_row + 3 + i) as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(bg),
@@ -2731,7 +2722,7 @@ impl Screen {
         } else {
             format!("{} commands", commands.len())
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row),
             SetBackgroundColor(bg),
@@ -2746,7 +2737,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row + 1),
             SetBackgroundColor(bg),
@@ -2756,7 +2747,7 @@ impl Screen {
         )?;
 
         // Show help in lighter text at bottom
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row + 2),
             SetForegroundColor(Color::AnsiValue(243)),
@@ -2765,7 +2756,7 @@ impl Screen {
         )?;
 
         // Hide cursor when in modal
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         self.stdout.flush()?;
         Ok(())
@@ -2801,7 +2792,7 @@ impl Screen {
         // Draw top border with title (show indicator when viewing alternates)
         let title = if show_alt { " Keybindings [/] " } else { " Keybindings " };
         let title_padding = (modal_width.saturating_sub(title.len() + 2)) / 2;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row as u16),
             SetBackgroundColor(bg),
@@ -2822,7 +2813,7 @@ impl Screen {
         let display_query = if query.is_empty() { "Type to filter..." } else { query };
         let input_display_width = modal_width.saturating_sub(5);
         let placeholder_color = if query.is_empty() { Color::AnsiValue(243) } else { Color::White };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 1) as u16),
             SetBackgroundColor(bg),
@@ -2838,7 +2829,7 @@ impl Screen {
         )?;
 
         // Draw separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, (start_row + 2) as u16),
             SetBackgroundColor(bg),
@@ -2890,7 +2881,7 @@ impl Screen {
                 shortcut.clone()
             };
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(item_bg),
@@ -2916,7 +2907,7 @@ impl Screen {
         // Fill remaining rows
         for i in row_offset..visible_rows {
             let row = (start_row + 3 + i) as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(bg),
@@ -2933,7 +2924,7 @@ impl Screen {
         } else {
             format!("{} keybinds", keybinds.len())
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, info_row),
             SetBackgroundColor(bg),
@@ -2948,7 +2939,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, info_row + 1),
             SetBackgroundColor(bg),
@@ -2963,7 +2954,7 @@ impl Screen {
         } else {
             "↑↓:scroll  PgUp/PgDn:page  Home/End:jump  /:alt binds  Esc:close"
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, info_row + 2),
             SetForegroundColor(Color::AnsiValue(243)),
@@ -2972,7 +2963,7 @@ impl Screen {
         )?;
 
         // Hide cursor when in modal
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         self.stdout.flush()?;
         Ok(())
@@ -3015,7 +3006,7 @@ impl Screen {
 
         // Draw top border with title
         let title = format!(" References ({}) ", filtered.len());
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row),
             SetBackgroundColor(bg),
@@ -3029,7 +3020,7 @@ impl Screen {
         )?;
 
         // Draw filter input row
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 1),
             SetBackgroundColor(bg),
@@ -3047,7 +3038,7 @@ impl Screen {
         )?;
 
         // Draw separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 2),
             SetBackgroundColor(bg),
@@ -3103,7 +3094,7 @@ impl Screen {
             // The remaining padding goes after line_info
             let remaining = panel_width.saturating_sub(max_path_width + line_info.len() + 4);
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(item_bg),
@@ -3124,7 +3115,7 @@ impl Screen {
         let items_drawn = filtered.len().saturating_sub(scroll_offset).min(visible_rows);
         for i in items_drawn..visible_rows {
             let row = start_row + 3 + i as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetBackgroundColor(bg),
@@ -3137,7 +3128,7 @@ impl Screen {
         // Draw help text row
         let help_row = start_row + 3 + visible_rows as u16;
         let help_text = "↑↓:nav  Enter:go  Esc:close";
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row),
             SetBackgroundColor(bg),
@@ -3151,7 +3142,7 @@ impl Screen {
         )?;
 
         // Draw bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, help_row + 1),
             SetBackgroundColor(bg),
@@ -3161,7 +3152,7 @@ impl Screen {
         )?;
 
         // Hide cursor when in references panel
-        execute!(self.stdout, Hide)?;
+        queue!(self.stdout, Hide)?;
 
         self.stdout.flush()?;
         Ok(())
@@ -3194,7 +3185,7 @@ impl Screen {
         }
 
         // Top border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row),
             SetForegroundColor(Color::Cyan),
@@ -3205,7 +3196,7 @@ impl Screen {
         )?;
 
         // Header
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 1),
             SetForegroundColor(Color::Cyan),
@@ -3218,7 +3209,7 @@ impl Screen {
         )?;
         let header_len = 25;
         let padding = panel_width - header_len - 7;
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(padding)),
             Print("Alt+M"),
@@ -3228,7 +3219,7 @@ impl Screen {
         )?;
 
         // Header separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 2),
             SetForegroundColor(Color::Cyan),
@@ -3245,7 +3236,7 @@ impl Screen {
             let row = start_row + 3 + i as u16;
             let is_selected = idx == panel.selected_index;
 
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetForegroundColor(Color::Cyan),
@@ -3254,19 +3245,19 @@ impl Screen {
 
             // Highlight selected row
             if is_selected {
-                execute!(self.stdout, SetAttribute(Attribute::Reverse))?;
+                queue!(self.stdout, SetAttribute(Attribute::Reverse))?;
             }
 
             // Status icon
-            execute!(self.stdout, Print(" "))?;
+            queue!(self.stdout, Print(" "))?;
             if server.is_installed {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(Color::Green),
                     Print("✓"),
                 )?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(Color::Red),
                     Print("✗"),
@@ -3281,7 +3272,7 @@ impl Screen {
                 format!(" {} ({})", server.name, server.language)
             };
             let name_len = name_lang.len().min(panel_width - 20);
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(if is_installing { Color::Yellow } else { Color::White }),
                 Print(&name_lang[..name_len]),
@@ -3303,16 +3294,16 @@ impl Screen {
             let used = 1 + 1 + name_len + status.len() + 1;
             let content_width = panel_width - 2;
             let status_padding = content_width.saturating_sub(used);
-            execute!(self.stdout, Print(" ".repeat(status_padding)))?;
+            queue!(self.stdout, Print(" ".repeat(status_padding)))?;
 
             if server.is_installed {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(Color::DarkGrey),
                     Print(status),
                 )?;
             } else {
-                execute!(
+                queue!(
                     self.stdout,
                     SetForegroundColor(Color::Yellow),
                     Print(status),
@@ -3320,10 +3311,10 @@ impl Screen {
             }
 
             if is_selected {
-                execute!(self.stdout, SetAttribute(Attribute::Reset))?;
+                queue!(self.stdout, SetAttribute(Attribute::Reset))?;
             }
 
-            execute!(
+            queue!(
                 self.stdout,
                 Print(" "),
                 SetForegroundColor(Color::Cyan),
@@ -3335,7 +3326,7 @@ impl Screen {
         // Fill remaining rows
         for i in (visible_end - panel.scroll_offset)..max_visible {
             let row = start_row + 3 + i as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetForegroundColor(Color::Cyan),
@@ -3348,7 +3339,7 @@ impl Screen {
 
         // Footer separator
         let footer_row = start_row + 3 + max_visible as u16;
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, footer_row),
             SetForegroundColor(Color::Cyan),
@@ -3359,7 +3350,7 @@ impl Screen {
         )?;
 
         // Status or help
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, footer_row + 1),
             SetForegroundColor(Color::Cyan),
@@ -3388,18 +3379,18 @@ impl Screen {
                 msg.clone()
             };
             let display_width = msg_display.width();
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::Yellow),
                 Print(format!(" {}", msg_display)),
             )?;
             // We printed 1 space + msg_display, need to fill to content_width
             let pad = content_width.saturating_sub(1 + display_width);
-            execute!(self.stdout, Print(" ".repeat(pad)))?;
+            queue!(self.stdout, Print(" ".repeat(pad)))?;
         } else {
             let help_text = " ↑↓ Navigate  Enter Install  r Refresh  Esc Close ";
             let help_width = help_text.width();
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::DarkGrey),
                 Print(help_text),
@@ -3407,10 +3398,10 @@ impl Screen {
             // Content width is panel_width - 2 (for borders)
             let content_width = panel_width - 2;
             let pad = content_width.saturating_sub(help_width);
-            execute!(self.stdout, Print(" ".repeat(pad)))?;
+            queue!(self.stdout, Print(" ".repeat(pad)))?;
         }
 
-        execute!(
+        queue!(
             self.stdout,
             SetForegroundColor(Color::Cyan),
             Print("│"),
@@ -3418,7 +3409,7 @@ impl Screen {
         )?;
 
         // Bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, footer_row + 2),
             SetForegroundColor(Color::Cyan),
@@ -3446,7 +3437,7 @@ impl Screen {
         };
 
         // Top border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row),
             SetForegroundColor(Color::Cyan),
@@ -3458,7 +3449,7 @@ impl Screen {
 
         // Title
         let title = format!(" Install {}? ", server.name);
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 1),
             SetForegroundColor(Color::Cyan),
@@ -3468,7 +3459,7 @@ impl Screen {
             SetAttribute(Attribute::Reset),
         )?;
         let pad = panel_width - 2 - title.len();
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(pad)),
             SetForegroundColor(Color::Cyan),
@@ -3477,7 +3468,7 @@ impl Screen {
         )?;
 
         // Blank line
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 2),
             SetForegroundColor(Color::Cyan),
@@ -3493,7 +3484,7 @@ impl Screen {
         } else {
             server.install_cmd.to_string()
         };
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 3),
             SetForegroundColor(Color::Cyan),
@@ -3504,7 +3495,7 @@ impl Screen {
             Print(&cmd_display),
         )?;
         let pad = panel_width - 12 - cmd_display.len();
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(pad)),
             SetForegroundColor(Color::Cyan),
@@ -3513,7 +3504,7 @@ impl Screen {
         )?;
 
         // Blank line
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 4),
             SetForegroundColor(Color::Cyan),
@@ -3524,7 +3515,7 @@ impl Screen {
         )?;
 
         // Buttons
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 5),
             SetForegroundColor(Color::Cyan),
@@ -3532,7 +3523,7 @@ impl Screen {
         )?;
         let button_text = "[Y]es    [N]o";
         let button_pad = (panel_width - 2 - button_text.len()) / 2;
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(button_pad)),
             Print("["),
@@ -3551,7 +3542,7 @@ impl Screen {
         )?;
 
         // Bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 6),
             SetForegroundColor(Color::Cyan),
@@ -3582,7 +3573,7 @@ impl Screen {
         let instructions = server.install_cmd.trim_start_matches('#').trim();
 
         // Top border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row),
             SetForegroundColor(Color::Cyan),
@@ -3594,7 +3585,7 @@ impl Screen {
 
         // Title
         let title = format!(" {} - Manual Installation ", server.name);
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 1),
             SetForegroundColor(Color::Cyan),
@@ -3605,7 +3596,7 @@ impl Screen {
             SetAttribute(Attribute::Reset),
         )?;
         let pad = panel_width - 2 - title.len();
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(pad)),
             SetForegroundColor(Color::Cyan),
@@ -3614,7 +3605,7 @@ impl Screen {
         )?;
 
         // Separator
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 2),
             SetForegroundColor(Color::Cyan),
@@ -3625,7 +3616,7 @@ impl Screen {
         )?;
 
         // Language
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 3),
             SetForegroundColor(Color::Cyan),
@@ -3636,7 +3627,7 @@ impl Screen {
             Print(server.language),
         )?;
         let lang_pad = panel_width - 13 - server.language.len();
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(lang_pad)),
             SetForegroundColor(Color::Cyan),
@@ -3645,7 +3636,7 @@ impl Screen {
         )?;
 
         // Blank line
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 4),
             SetForegroundColor(Color::Cyan),
@@ -3656,7 +3647,7 @@ impl Screen {
         )?;
 
         // Instructions label
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 5),
             SetForegroundColor(Color::Cyan),
@@ -3664,7 +3655,7 @@ impl Screen {
             SetForegroundColor(Color::White),
             Print(" Installation:"),
         )?;
-        execute!(
+        queue!(
             self.stdout,
             Print(" ".repeat(panel_width - 16)),
             SetForegroundColor(Color::Cyan),
@@ -3681,7 +3672,7 @@ impl Screen {
             } else {
                 line.to_string()
             };
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetForegroundColor(Color::Cyan),
@@ -3690,7 +3681,7 @@ impl Screen {
                 Print(format!("   {}", display_line)),
             )?;
             let line_pad = panel_width - 5 - display_line.len();
-            execute!(
+            queue!(
                 self.stdout,
                 Print(" ".repeat(line_pad)),
                 SetForegroundColor(Color::Cyan),
@@ -3702,7 +3693,7 @@ impl Screen {
         // Fill remaining instruction lines if less than 3
         for i in instr_lines.len()..3 {
             let row = start_row + 6 + i as u16;
-            execute!(
+            queue!(
                 self.stdout,
                 MoveTo(start_col as u16, row),
                 SetForegroundColor(Color::Cyan),
@@ -3714,7 +3705,7 @@ impl Screen {
         }
 
         // Blank line
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 9),
             SetForegroundColor(Color::Cyan),
@@ -3725,7 +3716,7 @@ impl Screen {
         )?;
 
         // Status or help line
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 10),
             SetForegroundColor(Color::Cyan),
@@ -3733,22 +3724,22 @@ impl Screen {
         )?;
 
         if panel.copied_to_clipboard {
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::Green),
                 Print(" ✓ Copied to clipboard!"),
             )?;
-            execute!(self.stdout, Print(" ".repeat(panel_width - 26)))?;
+            queue!(self.stdout, Print(" ".repeat(panel_width - 26)))?;
         } else {
-            execute!(
+            queue!(
                 self.stdout,
                 SetForegroundColor(Color::DarkGrey),
                 Print(" [C] Copy to clipboard  [Esc] Close"),
             )?;
-            execute!(self.stdout, Print(" ".repeat(panel_width - 38)))?;
+            queue!(self.stdout, Print(" ".repeat(panel_width - 38)))?;
         }
 
-        execute!(
+        queue!(
             self.stdout,
             SetForegroundColor(Color::Cyan),
             Print("│"),
@@ -3756,7 +3747,7 @@ impl Screen {
         )?;
 
         // Bottom border
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(start_col as u16, start_row + 11),
             SetForegroundColor(Color::Cyan),
@@ -3771,15 +3762,12 @@ impl Screen {
 
     /// Render the integrated terminal panel
     pub fn render_terminal(&mut self, terminal: &TerminalPanel, left_offset: u16) -> Result<()> {
-        // Hide cursor during render to prevent flicker
-        execute!(self.stdout, Hide)?;
-
         let start_row = terminal.render_start_row(self.rows);
         let height = terminal.height;
         let terminal_width = self.cols.saturating_sub(left_offset) as usize;
 
         // Draw terminal border (top line with title)
-        execute!(
+        queue!(
             self.stdout,
             MoveTo(left_offset, start_row),
             SetBackgroundColor(Color::AnsiValue(237)),
@@ -3797,7 +3785,7 @@ impl Screen {
                 .unwrap_or_else(|| "Terminal".to_string());
             let title = format!(" {} ", name);
             let separator = "─".repeat(terminal_width.saturating_sub(title.len() + 2) / 2);
-            execute!(
+            queue!(
                 self.stdout,
                 Print(&separator),
                 SetAttribute(Attribute::Bold),
@@ -3811,7 +3799,7 @@ impl Screen {
             // Pad to end of line
             let printed = separator.chars().count() * 2 + title.len();
             if printed < terminal_width {
-                execute!(self.stdout, Print(" ".repeat(terminal_width - printed)))?;
+                queue!(self.stdout, Print(" ".repeat(terminal_width - printed)))?;
             }
         } else {
             // Multiple sessions: render tab bar
@@ -3838,14 +3826,14 @@ impl Screen {
 
                 // Set colors based on active state
                 if is_active {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(Color::AnsiValue(238)),
                         SetForegroundColor(Color::White),
                         SetAttribute(Attribute::Bold),
                     )?;
                 } else {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(Color::AnsiValue(235)),
                         SetForegroundColor(Color::AnsiValue(245)),
@@ -3857,7 +3845,7 @@ impl Screen {
                 let padding = tab_width.saturating_sub(tab_content.len());
                 let left_pad = padding / 2;
                 let right_pad = padding - left_pad;
-                execute!(
+                queue!(
                     self.stdout,
                     Print(" ".repeat(left_pad)),
                     Print(&tab_content),
@@ -3867,7 +3855,7 @@ impl Screen {
 
                 // Separator between tabs
                 if i < session_count - 1 {
-                    execute!(
+                    queue!(
                         self.stdout,
                         SetBackgroundColor(Color::AnsiValue(237)),
                         SetForegroundColor(Color::AnsiValue(240)),
@@ -3880,7 +3868,7 @@ impl Screen {
 
             // Fill remaining space
             if printed < available_width {
-                execute!(
+                queue!(
                     self.stdout,
                     SetBackgroundColor(Color::AnsiValue(237)),
                     SetForegroundColor(Color::White),
@@ -3902,14 +3890,14 @@ impl Screen {
         let mut current_underline = false;
 
         // Set initial colors
-        execute!(
+        queue!(
             self.stdout,
             SetBackgroundColor(default_bg),
             SetForegroundColor(default_fg)
         )?;
 
         for row in 0..(height - 1) {
-            execute!(self.stdout, MoveTo(left_offset, start_row + 1 + row))?;
+            queue!(self.stdout, MoveTo(left_offset, start_row + 1 + row))?;
 
             // Build a string of characters with same attributes to batch print
             let mut batch = String::new();
@@ -3946,30 +3934,30 @@ impl Screen {
                     if !batch.is_empty() {
                         // Apply batch attributes if different from current
                         if batch_fg != current_fg {
-                            execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                            queue!(self.stdout, SetForegroundColor(batch_fg))?;
                             current_fg = batch_fg;
                         }
                         if batch_bg != current_bg {
-                            execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                            queue!(self.stdout, SetBackgroundColor(batch_bg))?;
                             current_bg = batch_bg;
                         }
                         if batch_bold != current_bold {
                             if batch_bold {
-                                execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                                queue!(self.stdout, SetAttribute(Attribute::Bold))?;
                             } else {
-                                execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                                queue!(self.stdout, SetAttribute(Attribute::NoBold))?;
                             }
                             current_bold = batch_bold;
                         }
                         if batch_underline != current_underline {
                             if batch_underline {
-                                execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                                queue!(self.stdout, SetAttribute(Attribute::Underlined))?;
                             } else {
-                                execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                                queue!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
                             }
                             current_underline = batch_underline;
                         }
-                        execute!(self.stdout, Print(&batch))?;
+                        queue!(self.stdout, Print(&batch))?;
                         batch.clear();
                     }
                     batch_fg = fg;
@@ -3983,38 +3971,37 @@ impl Screen {
             // Flush remaining batch for this row
             if !batch.is_empty() {
                 if batch_fg != current_fg {
-                    execute!(self.stdout, SetForegroundColor(batch_fg))?;
+                    queue!(self.stdout, SetForegroundColor(batch_fg))?;
                     current_fg = batch_fg;
                 }
                 if batch_bg != current_bg {
-                    execute!(self.stdout, SetBackgroundColor(batch_bg))?;
+                    queue!(self.stdout, SetBackgroundColor(batch_bg))?;
                     current_bg = batch_bg;
                 }
                 if batch_bold != current_bold {
                     if batch_bold {
-                        execute!(self.stdout, SetAttribute(Attribute::Bold))?;
+                        queue!(self.stdout, SetAttribute(Attribute::Bold))?;
                     } else {
-                        execute!(self.stdout, SetAttribute(Attribute::NoBold))?;
+                        queue!(self.stdout, SetAttribute(Attribute::NoBold))?;
                     }
                     current_bold = batch_bold;
                 }
                 if batch_underline != current_underline {
                     if batch_underline {
-                        execute!(self.stdout, SetAttribute(Attribute::Underlined))?;
+                        queue!(self.stdout, SetAttribute(Attribute::Underlined))?;
                     } else {
-                        execute!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
+                        queue!(self.stdout, SetAttribute(Attribute::NoUnderline))?;
                     }
                     current_underline = batch_underline;
                 }
-                execute!(self.stdout, Print(&batch))?;
+                queue!(self.stdout, Print(&batch))?;
             }
         }
 
-        // Position cursor in terminal (offset by left_offset)
-        execute!(
+        // Position cursor in terminal (offset by left_offset, but don't show - caller handles that)
+        queue!(
             self.stdout,
             MoveTo(left_offset + cursor_col, start_row + 1 + cursor_row),
-            Show,
             ResetColor
         )?;
 
