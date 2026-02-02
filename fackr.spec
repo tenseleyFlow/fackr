@@ -5,13 +5,9 @@ Summary:        Terminal text editor written in Rust
 
 License:        MIT
 URL:            https://github.com/tenseleyFlow/fackr
-Source0:        %{name}-%{version}.tar.gz
 
 # Disable debug package
 %global debug_package %{nil}
-
-BuildRequires:  rust
-BuildRequires:  cargo
 
 %description
 fackr is a terminal text editor written in Rust, a reimplementation of
@@ -26,20 +22,14 @@ Features:
 - Fast and lightweight
 
 %prep
-%autosetup
+# Pre-built from source
 
 %build
-cargo build --release
+# Pre-built from source
 
 %install
 mkdir -p %{buildroot}%{_bindir}
-install -Dm755 target/release/fackr %{buildroot}%{_bindir}/fackr
-
-# Note: Removed fac symlink to avoid conflict with facsimile package
-
-# Install documentation
-mkdir -p %{buildroot}%{_docdir}/%{name}
-install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md 2>/dev/null || true
+install -Dm755 %{_sourcedir}/fackr %{buildroot}%{_bindir}/fackr
 
 %files
 %{_bindir}/fackr
