@@ -6,9 +6,6 @@ Summary:        Terminal text editor written in Rust
 License:        MIT
 URL:            https://github.com/tenseleyFlow/fackr
 
-# Disable debug package
-%global debug_package %{nil}
-
 %description
 fackr is a terminal text editor written in Rust, a reimplementation of
 facsimile with VSCode-style keybindings. It provides a familiar editing
