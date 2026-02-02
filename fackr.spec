@@ -1,13 +1,11 @@
 Name:           fackr
-Version:        0.9.7
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Terminal text editor written in Rust
 
 License:        MIT
-URL:            https://github.com/TenseleyFlow/fackr
+URL:            https://github.com/tenseleyFlow/fackr
 Source0:        %{name}-%{version}.tar.gz
-
-BuildArch:      x86_64
 
 # Disable debug package
 %global debug_package %{nil}
@@ -37,6 +35,8 @@ cargo build --release
 mkdir -p %{buildroot}%{_bindir}
 install -Dm755 target/release/fackr %{buildroot}%{_bindir}/fackr
 
+# Note: Removed fac symlink to avoid conflict with facsimile package
+
 # Install documentation
 mkdir -p %{buildroot}%{_docdir}/%{name}
 install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md 2>/dev/null || true
@@ -45,8 +45,12 @@ install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md 2>/dev/null ||
 %{_bindir}/fackr
 
 %changelog
-* Wed Dec 11 2024 mfw <espadon@outlook.com> - 0.9.7-1
-- Fix shift-key handling on kitty protocol terminals
+* Tue Jan 28 2026 mfw <espadonne@outlook.com> - 1.2.0-1
+- Version bump to 1.2.0
+- Bug fixes and improvements
+
+* Tue Jan 07 2025 mfw <espadonne@outlook.com> - 1.1.2-1
+- Version bump to 1.1.2
 
 * Wed Dec 11 2024 mfw <espadon@outlook.com> - 0.9.6-1
 - Fix command palette char input
