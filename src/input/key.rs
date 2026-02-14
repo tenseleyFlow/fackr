@@ -45,6 +45,13 @@ impl Key {
         let modifiers = Modifiers::from(event.modifiers);
         let key = match event.code {
             KeyCode::Char(c) => {
+                // Some terminals report Enter/newline as Char('\r') or Char('\n')
+                // during paste or raw key input. Normalize those to Enter so
+                // multiline paste preserves line breaks.
+                if c == '\r' || c == '\n' {
+                    return (Key::Enter, modifiers);
+                }
+
                 // If shift is pressed and character is lowercase alphabetic,
                 // uppercase it. This handles terminals that don't support
                 // REPORT_ALTERNATE_KEYS properly (which would report 'A' directly).
@@ -74,5 +81,38 @@ impl Key {
             _ => Key::Null,
         };
         (key, modifiers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn char_carriage_return_maps_to_enter() {
+        let (key, mods) = Key::from_crossterm(KeyEvent::new(
+            KeyCode::Char('\r'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(key, Key::Enter);
+        assert_eq!(mods, Modifiers::default());
+    }
+
+    #[test]
+    fn char_newline_maps_to_enter() {
+        let (key, mods) = Key::from_crossterm(KeyEvent::new(
+            KeyCode::Char('\n'),
+            KeyModifiers::SHIFT,
+        ));
+        assert_eq!(key, Key::Enter);
+        assert_eq!(
+            mods,
+            Modifiers {
+                ctrl: false,
+                alt: false,
+                shift: true,
+            }
+        );
     }
 }

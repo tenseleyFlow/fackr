@@ -822,6 +822,7 @@ impl Editor {
                     Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
                         self.process_key(key_event)?
                     }
+                    Event::Paste(text) => self.process_paste(&text)?,
                     Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
                     Event::Resize(cols, rows) => {
                         self.screen.cols = cols;
@@ -839,6 +840,7 @@ impl Editor {
                         Event::Key(key_event) if key_event.kind != KeyEventKind::Release => {
                             self.process_key(key_event)?
                         }
+                        Event::Paste(text) => self.process_paste(&text)?,
                         Event::Mouse(mouse_event) => self.process_mouse(mouse_event)?,
                         Event::Resize(cols, rows) => {
                             self.screen.cols = cols;
@@ -1725,29 +1727,33 @@ impl Editor {
             let timeout = Duration::from_millis(self.escape_time);
 
             if event::poll(timeout)? {
-                if let Event::Key(next_event) = event::read()? {
-                    // Check for CSI sequences (ESC [ ...) which are arrow keys etc.
-                    if next_event.code == KeyCode::Char('[') {
-                        // CSI sequence - read the rest
-                        if event::poll(timeout)? {
-                            if let Event::Key(csi_event) = event::read()? {
-                                let mods = Modifiers { alt: true, ..Default::default() };
-                                return match csi_event.code {
-                                    KeyCode::Char('A') => self.handle_key_with_mods(Key::Up, mods),
-                                    KeyCode::Char('B') => self.handle_key_with_mods(Key::Down, mods),
-                                    KeyCode::Char('C') => self.handle_key_with_mods(Key::Right, mods),
-                                    KeyCode::Char('D') => self.handle_key_with_mods(Key::Left, mods),
-                                    _ => Ok(()), // Unknown CSI sequence
-                                };
+                match event::read()? {
+                    Event::Key(next_event) => {
+                        // Check for CSI sequences (ESC [ ...) which are arrow keys etc.
+                        if next_event.code == KeyCode::Char('[') {
+                            // CSI sequence - read the rest
+                            if event::poll(timeout)? {
+                                if let Event::Key(csi_event) = event::read()? {
+                                    let mods = Modifiers { alt: true, ..Default::default() };
+                                    return match csi_event.code {
+                                        KeyCode::Char('A') => self.handle_key_with_mods(Key::Up, mods),
+                                        KeyCode::Char('B') => self.handle_key_with_mods(Key::Down, mods),
+                                        KeyCode::Char('C') => self.handle_key_with_mods(Key::Right, mods),
+                                        KeyCode::Char('D') => self.handle_key_with_mods(Key::Left, mods),
+                                        _ => Ok(()), // Unknown CSI sequence
+                                    };
+                                }
                             }
+                            return Ok(()); // Incomplete CSI
                         }
-                        return Ok(()); // Incomplete CSI
-                    }
 
-                    // Regular Alt+key (ESC followed by a normal key)
-                    let (key, mut mods) = Key::from_crossterm(next_event);
-                    mods.alt = true;
-                    return self.handle_key_with_mods(key, mods);
+                        // Regular Alt+key (ESC followed by a normal key)
+                        let (key, mut mods) = Key::from_crossterm(next_event);
+                        mods.alt = true;
+                        return self.handle_key_with_mods(key, mods);
+                    }
+                    Event::Paste(text) => return self.process_paste(&text),
+                    _ => {}
                 }
             }
             // No key followed - it's a real Escape
@@ -1757,6 +1763,45 @@ impl Editor {
         // Normal key processing
         let (key, mods) = Key::from_crossterm(key_event);
         self.handle_key_with_mods(key, mods)
+    }
+
+    /// Process a paste event from the terminal.
+    /// Handles multiline text and normalizes CRLF/CR line endings.
+    fn process_paste(&mut self, text: &str) -> Result<()> {
+        let text = Self::normalize_line_endings(text);
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        // Route paste to terminal when terminal has focus.
+        if self.focus == Focus::Terminal && self.terminal.visible {
+            self.terminal.send_input(text.as_bytes())?;
+            return Ok(());
+        }
+
+        // Fast path for editor: insert as one operation to preserve undo grouping.
+        if self.prompt == PromptState::None && self.focus == Focus::Editor {
+            self.history_mut().maybe_break_group();
+            self.insert_text(&text);
+            self.dismiss_ghost_text();
+            self.message = Some("Pasted".to_string());
+            self.history_mut().maybe_break_group();
+            self.on_buffer_edit();
+            self.scroll_to_cursor();
+            return Ok(());
+        }
+
+        // For prompts, server manager, or fuss mode, replay as plain key input.
+        for c in text.chars() {
+            let key = match c {
+                '\n' => Key::Enter,
+                '\t' => Key::Tab,
+                _ => Key::Char(c),
+            };
+            self.handle_key_with_mods(key, Modifiers::default())?;
+        }
+
+        Ok(())
     }
 
     /// Process a mouse event
@@ -3510,7 +3555,12 @@ impl Editor {
     }
 
     fn insert_text(&mut self, text: &str) {
-        self.insert_text_multi(text);
+        if text.contains('\r') || text.contains('\u{2028}') || text.contains('\u{2029}') {
+            let normalized = Self::normalize_line_endings(text);
+            self.insert_text_multi(&normalized);
+        } else {
+            self.insert_text_multi(text);
+        }
     }
 
     fn insert_char(&mut self, c: char) {
@@ -4567,6 +4617,31 @@ impl Editor {
         self.internal_clipboard = text;
     }
 
+    /// Normalize CRLF/CR to LF for internal editing operations.
+    fn normalize_line_endings(text: &str) -> String {
+        if !text.contains('\r') && !text.contains('\u{2028}') && !text.contains('\u{2029}') {
+            return text.to_string();
+        }
+
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\r' => {
+                    // Collapse CRLF into a single LF.
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    out.push('\n');
+                }
+                // Unicode line and paragraph separators
+                '\u{2028}' | '\u{2029}' => out.push('\n'),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
     /// Get clipboard text (system if available, internal fallback)
     fn get_clipboard(&mut self) -> String {
         if let Some(ref mut cb) = self.clipboard {
@@ -4641,7 +4716,7 @@ impl Editor {
     }
 
     fn paste(&mut self) {
-        let text = self.get_clipboard();
+        let text = Self::normalize_line_endings(&self.get_clipboard());
         if !text.is_empty() {
             self.insert_text(&text);
             self.message = Some("Pasted".to_string());

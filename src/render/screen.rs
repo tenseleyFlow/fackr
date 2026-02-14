@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{
-        DisableMouseCapture, EnableMouseCapture,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
@@ -113,7 +113,13 @@ impl Screen {
 
     pub fn enter_raw_mode(&mut self) -> Result<()> {
         terminal::enable_raw_mode()?;
-        execute!(self.stdout, EnterAlternateScreen, Hide, EnableMouseCapture)?;
+        execute!(
+            self.stdout,
+            EnterAlternateScreen,
+            Hide,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
 
         // Try to enable keyboard enhancement for better modifier key detection
         // This enables the kitty keyboard protocol on supporting terminals.
@@ -139,7 +145,13 @@ impl Screen {
         if self.keyboard_enhanced {
             let _ = execute!(self.stdout, PopKeyboardEnhancementFlags);
         }
-        execute!(self.stdout, Show, DisableMouseCapture, LeaveAlternateScreen)?;
+        execute!(
+            self.stdout,
+            Show,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )?;
         terminal::disable_raw_mode()?;
         Ok(())
     }
