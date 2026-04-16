@@ -1775,7 +1775,7 @@ impl Editor {
 
         // Route paste to terminal when terminal has focus.
         if self.focus == Focus::Terminal && self.terminal.visible {
-            self.terminal.send_input(text.as_bytes())?;
+            self.terminal.send_paste(text.as_bytes())?;
             return Ok(());
         }
 

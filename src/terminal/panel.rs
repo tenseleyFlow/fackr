@@ -73,6 +73,16 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Send pasted input, honoring bracketed paste mode when requested by the app.
+    fn send_paste(&mut self, data: &[u8]) -> Result<()> {
+        let payload = if self.screen.bracketed_paste_enabled() {
+            encode_bracketed_paste(data)
+        } else {
+            data.to_vec()
+        };
+        self.send_input(&payload)
+    }
+
     /// Resize this session
     fn resize(&mut self, width: u16, height: u16) {
         self.screen.resize(width, height);
@@ -223,6 +233,14 @@ impl TerminalPanel {
     pub fn send_input(&mut self, data: &[u8]) -> Result<()> {
         if let Some(session) = self.sessions.get_mut(self.active_session) {
             session.send_input(data)?;
+        }
+        Ok(())
+    }
+
+    /// Send pasted input to the active terminal session.
+    pub fn send_paste(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(session) = self.sessions.get_mut(self.active_session) {
+            session.send_paste(data)?;
         }
         Ok(())
     }
@@ -392,5 +410,26 @@ impl TerminalPanel {
             Color::Indexed(idx) => CtColor::AnsiValue(*idx),
             Color::Rgb(r, g, b) => CtColor::Rgb { r: *r, g: *g, b: *b },
         }
+    }
+}
+
+fn encode_bracketed_paste(data: &[u8]) -> Vec<u8> {
+    let mut wrapped = Vec::with_capacity(data.len() + 12);
+    wrapped.extend_from_slice(b"\x1b[200~");
+    wrapped.extend_from_slice(data);
+    wrapped.extend_from_slice(b"\x1b[201~");
+    wrapped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_bracketed_paste;
+
+    #[test]
+    fn bracketed_paste_wraps_raw_bytes() {
+        assert_eq!(
+            encode_bracketed_paste(b"line 1\nline 2"),
+            b"\x1b[200~line 1\nline 2\x1b[201~"
+        );
     }
 }

@@ -209,6 +209,11 @@ impl TerminalScreen {
         std::mem::take(&mut self.response_queue)
     }
 
+    /// Whether the application running in the terminal has enabled bracketed paste.
+    pub fn bracketed_paste_enabled(&self) -> bool {
+        self.bracketed_paste
+    }
+
     /// Enter alternate screen buffer
     fn enter_alt_screen(&mut self) {
         if !self.using_alt_screen {
