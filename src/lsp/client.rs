@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -14,8 +14,12 @@ use super::manager::LspManager;
 use super::protocol;
 use super::types::{
     detect_language, path_to_uri, CompletionItem, Diagnostic, DocumentSymbol, HoverInfo, Location,
-    Position, Range, TextEdit, WorkspaceEdit,
+    Position, PositionEncoding, Range, TextEdit, WorkspaceEdit,
 };
+
+/// How many server messages to keep. Enough to hold a failed startup;
+/// bounded so a chatty server cannot grow the editor's memory without limit.
+const SERVER_LOG_LINES: usize = 128;
 
 /// Document state tracked by the LSP client
 #[derive(Debug)]
@@ -35,6 +39,8 @@ pub struct LspClient {
     response_tx: Sender<LspResponse>,
     /// Pending diagnostics by URI
     diagnostics: Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>,
+    /// Recent `window/logMessage` / `window/showMessage` text, newest last
+    server_log: Arc<Mutex<VecDeque<(u8, String)>>>,
 }
 
 /// Response types that can be received asynchronously
@@ -76,12 +82,27 @@ impl LspClient {
             }
         });
 
+        // Keep what the server says about itself. Discarding it made a server
+        // that failed to start indistinguishable from one that had nothing
+        // to report.
+        let server_log = Arc::new(Mutex::new(VecDeque::with_capacity(SERVER_LOG_LINES)));
+        let log_clone = Arc::clone(&server_log);
+        manager.set_log_callback(move |level, text| {
+            if let Ok(mut log) = log_clone.lock() {
+                if log.len() == SERVER_LOG_LINES {
+                    log.pop_front();
+                }
+                log.push_back((level, text));
+            }
+        });
+
         Self {
             manager,
             documents: HashMap::new(),
             response_rx: rx,
             response_tx: tx,
             diagnostics,
+            server_log,
         }
     }
 
@@ -455,6 +476,23 @@ impl LspClient {
     /// Process pending server messages (call this regularly)
     pub fn process_messages(&mut self) {
         self.manager.process_messages();
+    }
+
+    /// Recent server messages, oldest first: `(MessageType, text)`.
+    pub fn server_log(&self) -> Vec<(u8, String)> {
+        self.server_log
+            .lock()
+            .map(|log| log.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// The position encoding negotiated with the server for a language.
+    ///
+    /// `None` when no server is running. Anything but
+    /// [`PositionEncoding::Utf32`] means this client's char columns are not
+    /// the wire's `character` units.
+    pub fn position_encoding(&self, language: &str) -> Option<PositionEncoding> {
+        self.manager.position_encoding(language)
     }
 
     /// Check if LSP is available for a language

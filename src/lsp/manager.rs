@@ -11,10 +11,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use super::message::{DiagnosticsCallback, MessageHandler, ResponseCallback};
+use super::message::{DiagnosticsCallback, LogCallback, MessageHandler, ResponseCallback};
 use super::process::ServerProcess;
 use super::protocol::{self, LspMessage};
-use super::types::{Capabilities, ServerConfig};
+use super::types::{Capabilities, PositionEncoding, ServerConfig};
 
 /// State of a language server
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,13 @@ pub struct ManagedServer {
     pub process: ServerProcess,
     pub state: ServerState,
     pub capabilities: Capabilities,
+    /// The encoding negotiated at `initialize`, fixed for the session.
+    ///
+    /// fackr sends char columns, so anything but
+    /// [`PositionEncoding::Utf32`] means positions past a non-BMP (or, under
+    /// utf-8, any multi-byte) character are off. Until UTF-16 conversion
+    /// exists this is recorded and reported, not corrected.
+    pub position_encoding: PositionEncoding,
     pub handler: MessageHandler,
     /// Queued didOpen notifications (for files opened before initialization)
     pending_opens: Vec<LspMessage>,
@@ -44,6 +51,7 @@ impl ManagedServer {
             process,
             state: ServerState::Starting,
             capabilities: Capabilities::default(),
+            position_encoding: PositionEncoding::default(),
             handler: MessageHandler::new(),
             pending_opens: Vec::new(),
         }
@@ -60,6 +68,8 @@ pub struct LspManager {
     servers: HashMap<String, Vec<ManagedServer>>,
     /// Global diagnostics callback
     diagnostics_callback: Option<Arc<Mutex<DiagnosticsCallback>>>,
+    /// Global server-message callback (`window/logMessage` and friends)
+    log_callback: Option<Arc<Mutex<LogCallback>>>,
 }
 
 impl LspManager {
@@ -70,6 +80,7 @@ impl LspManager {
             configs: HashMap::new(),
             servers: HashMap::new(),
             diagnostics_callback: None,
+            log_callback: None,
         };
         manager.register_default_configs();
         manager
@@ -81,6 +92,14 @@ impl LspManager {
         F: Fn(String, Vec<super::types::Diagnostic>) + Send + 'static,
     {
         self.diagnostics_callback = Some(Arc::new(Mutex::new(Box::new(callback))));
+    }
+
+    /// Set the global server-message callback
+    pub fn set_log_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(u8, String) + Send + 'static,
+    {
+        self.log_callback = Some(Arc::new(Mutex::new(Box::new(callback))));
     }
 
     /// Register default server configurations
@@ -177,6 +196,11 @@ impl LspManager {
 
         // Zig - zls
         self.register_config(ServerConfig::new("zls", "zig", vec!["zls"]));
+
+        // Wolf - the compiler is the language server; there is no separate
+        // binary to install. Spawned by bare PATH lookup, like every other
+        // entry here: no version check and no path override.
+        self.register_config(ServerConfig::new("wolf", "wolf", vec!["wolf", "lsp"]));
 
         // Haskell - haskell-language-server
         self.register_config(ServerConfig::new(
@@ -460,6 +484,16 @@ impl LspManager {
             ));
         }
 
+        // Set up the server-message callback if configured
+        if let Some(ref callback) = self.log_callback {
+            let cb = Arc::clone(callback);
+            server.handler.set_log_callback(Box::new(move |level, text| {
+                if let Ok(cb) = cb.lock() {
+                    cb(level, text);
+                }
+            }));
+        }
+
         // Send initialize request
         let id = protocol::next_request_id();
         let init_msg = protocol::create_initialize_request(id, &self.workspace_root, "fackr");
@@ -520,7 +554,27 @@ impl LspManager {
                             if let Some(result) = result {
                                 // Parse capabilities
                                 server.capabilities = protocol::parse_capabilities(result);
+                                server.position_encoding =
+                                    protocol::parse_position_encoding(result);
                                 server.state = ServerState::Ready;
+
+                                // fackr's columns are code points. A server
+                                // that did not take utf-32 leaves them right
+                                // only up to the first astral character, and
+                                // that is worth saying out loud rather than
+                                // discovering as a corrupted buffer.
+                                if !server.position_encoding.matches_char_columns() {
+                                    server.handler.note_server_message(
+                                        2,
+                                        format!(
+                                            "{}: negotiated positionEncoding {} — columns past \
+                                             a non-BMP character may be off (fackr sends code \
+                                             points)",
+                                            server.config.name,
+                                            server.position_encoding.as_wire()
+                                        ),
+                                    );
+                                }
 
                                 // Send initialized notification
                                 let init_notif = protocol::create_initialized_notification();
@@ -633,6 +687,14 @@ impl LspManager {
         self.servers
             .get(language)
             .map_or(false, |s| !s.is_empty() && s.iter().any(|s| s.state == ServerState::Ready))
+    }
+
+    /// The encoding negotiated with the running server for a language
+    pub fn position_encoding(&self, language: &str) -> Option<PositionEncoding> {
+        self.servers
+            .get(language)
+            .and_then(|servers| servers.first())
+            .map(|server| server.position_encoding)
     }
 
     /// Get the workspace root

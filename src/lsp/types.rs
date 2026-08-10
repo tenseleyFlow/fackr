@@ -21,6 +21,54 @@ impl Position {
     }
 }
 
+/// The position encoding a session speaks (LSP 3.17 `positionEncoding`).
+///
+/// Every `character` on the wire is an offset in *these* units. fackr counts
+/// columns in `ropey` chars — Unicode scalar values — which is exactly
+/// `Utf32`; under any other encoding a column is only accidentally right (see
+/// [`PositionEncoding::matches_char_columns`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PositionEncoding {
+    /// UTF-8 code units, i.e. byte columns.
+    Utf8,
+    /// UTF-16 code units — the protocol's mandatory default, and what a
+    /// server picks when it cannot honour anything we offered.
+    #[default]
+    Utf16,
+    /// Unicode code points — what a rope counts, and what fackr sends.
+    Utf32,
+}
+
+impl PositionEncoding {
+    /// Parse a `PositionEncodingKind` string. Unknown kinds are `None`.
+    pub fn from_wire(kind: &str) -> Option<Self> {
+        match kind {
+            "utf-8" => Some(Self::Utf8),
+            "utf-16" => Some(Self::Utf16),
+            "utf-32" => Some(Self::Utf32),
+            _ => None,
+        }
+    }
+
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            Self::Utf8 => "utf-8",
+            Self::Utf16 => "utf-16",
+            Self::Utf32 => "utf-32",
+        }
+    }
+
+    /// Whether a fackr char column is literally a wire `character`.
+    ///
+    /// True only for UTF-32. Under UTF-16 a column is right for the whole BMP
+    /// and off by one per preceding astral character (an emoji in a string or
+    /// a comment); under UTF-8 it is off by one per preceding multi-byte
+    /// character, which is most non-English text.
+    pub fn matches_char_columns(&self) -> bool {
+        matches!(self, Self::Utf32)
+    }
+}
+
 /// Range in a document
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Range {
@@ -419,6 +467,9 @@ pub fn detect_language(path: &str) -> Option<&'static str> {
         "clj" | "cljs" | "cljc" => Some("clojure"),
         "f90" | "f95" | "f03" | "f08" | "for" | "ftn" => Some("fortran"),
         "zig" => Some("zig"),
+        // Wolf: `.lu` sources and `.wolfi` interface files share one
+        // languageId; the compiler itself serves LSP (`wolf lsp`).
+        "lu" | "wolfi" => Some("wolf"),
         "nim" => Some("nim"),
         "odin" => Some("odin"),
         "v" => Some("v"),

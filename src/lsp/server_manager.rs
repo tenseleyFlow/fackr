@@ -177,6 +177,16 @@ pub fn get_known_servers() -> Vec<KnownServer> {
             "# Install via package manager or zigtools",
             "Zig language server",
         ),
+        // Wolf — the compiler *is* the server, so there is nothing separate to
+        // install and no one-line installer to shell out to; the leading `#`
+        // routes this row to the manual-info dialog.
+        KnownServer::new(
+            "wolf",
+            "Wolf",
+            "wolf",
+            "# Install the wolf compiler; `wolf lsp` is the server",
+            "Wolf language server (the wolf compiler itself)",
+        ),
         // Haskell
         KnownServer::new(
             "haskell-language-server",

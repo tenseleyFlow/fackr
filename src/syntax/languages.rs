@@ -31,6 +31,7 @@ pub enum Language {
     Clojure,
     Fortran,
     Zig,
+    Wolf,
     Nim,
     Odin,
     V,
@@ -131,6 +132,7 @@ impl Language {
 
             // System languages
             "zig" => Some(Language::Zig),
+            "lu" | "wolfi" => Some(Language::Wolf),
             "nim" | "nims" => Some(Language::Nim),
             "odin" => Some(Language::Odin),
             "v" => Some(Language::V),
@@ -195,6 +197,7 @@ impl Language {
             Language::Clojure => clojure_def(),
             Language::Fortran => fortran_def(),
             Language::Zig => zig_def(),
+            Language::Wolf => wolf_def(),
             Language::Nim => nim_def(),
             Language::Odin => odin_def(),
             Language::V => v_def(),
@@ -249,6 +252,7 @@ impl Language {
             Language::Clojure => "Clojure",
             Language::Fortran => "Fortran",
             Language::Zig => "Zig",
+            Language::Wolf => "Wolf",
             Language::Nim => "Nim",
             Language::Odin => "Odin",
             Language::V => "V",
@@ -1048,6 +1052,55 @@ fn zig_def() -> LanguageDef {
         multiline_strings: false,
         operators: C_OPERATORS.to_vec(),
         punctuation: C_PUNCTUATION.to_vec(),
+        has_preprocessor: false,
+        case_sensitive: true,
+    }
+}
+
+/// Wolf (`.lu`, `.wolfi`).
+///
+/// Generated from the wolf grammar pinned in wolf-lsp
+/// (`vendor/upstream/spec/grammar.ebnf` + `spec/01-grammar.md` §3.2 at
+/// commit 67c977f) — see `clients/fackr/inventory.md` there. Do not hand-edit:
+/// a grammar change is a regenerated table, which is what makes wolf-lsp's
+/// drift check able to fail on this file.
+///
+/// Notes on what is deliberately absent:
+/// - The 50 reserved keywords are the whole closed set (`[gram.inv.kw]`).
+///   Contextual keywords (`c`, `rc`, `pool`, `from`, `timeout`, `noalias`,
+///   `pkg`, `reg`, `self`) are identifiers everywhere except one position
+///   each, and a regex tokenizer cannot see that position — highlighting them
+///   as keywords would be wrong more often than right.
+/// - No block comments: `[gram.lex.comment]` has only `//`, `///`, `//!`.
+/// - `types` holds only names the pinned spec and corpus actually contain;
+///   wolf has no fixed-width scalar inventory in the pin yet.
+fn wolf_def() -> LanguageDef {
+    LanguageDef {
+        name: "Wolf",
+        keywords: [
+            "as", "asm", "assume", "borrow", "break", "comptime", "const",
+            "continue", "copy", "defer", "distinct", "dyn", "else", "enum",
+            "errdefer", "export", "extern", "false", "fn", "for", "freeze",
+            "handle", "if", "impl", "import", "in", "let", "loop", "match",
+            "move", "mut", "proc", "pub", "region", "return", "scope",
+            "select", "shared", "spawn", "struct", "take", "trait", "true",
+            "type", "unsafe", "use", "var", "weak", "when", "while",
+        ].into_iter().collect(),
+        types: ["bool", "int", "str", "Self"].into_iter().collect(),
+        line_comment: Some("//"),
+        block_comment_start: None,
+        block_comment_end: None,
+        string_delimiters: vec!['"'],
+        multiline_strings: true,
+        operators: vec![
+            // Longest first: the scanner takes the first match.
+            "<=>", "<<=", ">>=", "..=",
+            "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "..", "->", "=>",
+            "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+            "+", "-", "*", "/", "%", "&", "|", "^", "!", "<", ">", "=", "?",
+            "@",
+        ],
+        punctuation: vec!['{', '}', '(', ')', '[', ']', ',', '.', ':', ';'],
         has_preprocessor: false,
         case_sensitive: true,
     }

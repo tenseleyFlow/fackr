@@ -690,4 +690,44 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token_type, TokenType::Comment);
     }
+
+    /// `.lu` is detected, and the wolf table's keywords/types/strings/numbers
+    /// all reach the tokenizer. The line is the opening of the vendored
+    /// `hello.lu` corpus sample.
+    #[test]
+    fn test_wolf_tokens() {
+        assert_eq!(Language::detect("main.lu"), Some(Language::Wolf));
+        assert_eq!(Language::detect("shapes.wolfi"), Some(Language::Wolf));
+
+        let mut hl = Highlighter::new();
+        hl.set_language(Language::Wolf);
+        let mut state = HighlightState::default();
+
+        let tokens = hl.tokenize_line("fn main() -> !int { let who = \"wolf\" }", &mut state);
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::Keyword)); // fn / let
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::Type)); // int
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::String)); // "wolf"
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::Operator)); // ->
+
+        // `//!` inner doc comments are line comments, not an unknown token.
+        let tokens = hl.tokenize_line("//! check: run(exit=0)", &mut state);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].token_type, TokenType::Comment);
+    }
+
+    /// Wolf has no block comments (`[gram.lex.comment]`) — a `/*` is two
+    /// operator tokens, and must not swallow the rest of the file.
+    #[test]
+    fn test_wolf_has_no_block_comments() {
+        let def = Language::Wolf.definition();
+        assert!(def.block_comment_start.is_none());
+        assert!(def.block_comment_end.is_none());
+
+        let mut hl = Highlighter::new();
+        hl.set_language(Language::Wolf);
+        let mut state = HighlightState::default();
+
+        let tokens = hl.tokenize_line("let x = 1 /* not a comment */", &mut state);
+        assert!(!tokens.iter().any(|t| t.token_type == TokenType::Comment));
+    }
 }

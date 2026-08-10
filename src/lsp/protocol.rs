@@ -9,7 +9,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use super::types::{Capabilities, Position, Range};
+use super::types::{Capabilities, Position, PositionEncoding, Range};
+
+/// The position encodings this client declares, in preference order.
+///
+/// **UTF-32 alone, on purpose.** fackr's columns are `ropey` char offsets —
+/// code points — and it assigns an incoming `character` straight into a char
+/// column. UTF-32 is therefore the only encoding under which that arithmetic
+/// is *correct* rather than accidentally correct, and declaring it is the
+/// whole fix: no conversion code, no per-site rewrite.
+///
+/// Listing `utf-16` as a fallback would defeat it. The order in this array is
+/// a client *preference*, not a constraint, and servers are free to pick by
+/// their own order — wolf, for one, takes utf-8 if offered, else utf-16, and
+/// only reaches utf-32 when it is the sole offer. Offering utf-16 alongside
+/// would hand back the exact off-by-one this exists to remove.
+///
+/// A server that supports none of this must reply `utf-16` per the spec,
+/// which is precisely fackr's pre-existing behaviour — so the floor here is
+/// "no worse than before", and now the client can *see* which case it is in
+/// (`ManagedServer::position_encoding`).
+pub const CLIENT_POSITION_ENCODINGS: &[&str] = &["utf-32"];
 
 /// Global request ID counter
 static NEXT_REQUEST_ID: AtomicI64 = AtomicI64::new(1);
@@ -133,6 +153,9 @@ pub fn create_initialize_request(
     client_name: &str,
 ) -> LspMessage {
     let capabilities = json!({
+        "general": {
+            "positionEncodings": CLIENT_POSITION_ENCODINGS
+        },
         "textDocument": {
             "completion": {
                 "completionItem": {
@@ -472,6 +495,20 @@ pub fn parse_capabilities(result: &Value) -> Capabilities {
     }
 }
 
+/// Parse the negotiated position encoding from an initialize response.
+///
+/// Absent means UTF-16: the protocol's mandatory default, and the only legal
+/// reading of a server that says nothing. An unknown kind is treated the same
+/// way — a server naming an encoding neither side can produce is a server
+/// whose positions we must not trust to be code points.
+pub fn parse_position_encoding(result: &Value) -> PositionEncoding {
+    let caps = result.get("capabilities").unwrap_or(result);
+    caps.get("positionEncoding")
+        .and_then(|v| v.as_str())
+        .and_then(PositionEncoding::from_wire)
+        .unwrap_or(PositionEncoding::Utf16)
+}
+
 /// Parse Position from JSON
 pub fn parse_position(value: &Value) -> Option<super::types::Position> {
     Some(super::types::Position {
@@ -723,4 +760,61 @@ pub fn parse_workspace_edit(result: &Value) -> super::types::WorkspaceEdit {
     }
 
     edit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The declaration is the whole encoding fix; a regression here is silent
+    /// buffer corruption on astral text, so it is asserted literally.
+    #[test]
+    fn initialize_declares_utf32_only() {
+        let LspMessage::Request { params, .. } = create_initialize_request(1, "/tmp/w", "fackr")
+        else {
+            panic!("initialize must be a request");
+        };
+        let encodings = params.as_ref().unwrap()["capabilities"]["general"]["positionEncodings"]
+            .as_array()
+            .expect("general.positionEncodings must be declared");
+        assert_eq!(encodings, &[Value::from("utf-32")]);
+    }
+
+    #[test]
+    fn negotiated_encoding_is_read_from_the_reply() {
+        let result = json!({ "capabilities": { "positionEncoding": "utf-32" } });
+        assert_eq!(parse_position_encoding(&result), PositionEncoding::Utf32);
+        assert!(parse_position_encoding(&result).matches_char_columns());
+    }
+
+    /// A server that says nothing has said "utf-16" — and a server naming a
+    /// kind we cannot produce must not be taken at its word.
+    #[test]
+    fn absent_or_unknown_encoding_falls_back_to_utf16() {
+        let silent = json!({ "capabilities": { "hoverProvider": true } });
+        assert_eq!(parse_position_encoding(&silent), PositionEncoding::Utf16);
+
+        let odd = json!({ "capabilities": { "positionEncoding": "utf-7" } });
+        assert_eq!(parse_position_encoding(&odd), PositionEncoding::Utf16);
+        assert!(!parse_position_encoding(&odd).matches_char_columns());
+    }
+
+    /// `Content-Length` counts bytes. The write side already got this right;
+    /// the test keeps it that way now that the read side depends on it.
+    #[test]
+    fn content_length_counts_bytes() {
+        let msg = LspMessage::Notification {
+            method: "window/logMessage".to_string(),
+            params: Some(json!({ "message": "🐺" })),
+        };
+        let wire = msg.to_string();
+        let (header, body) = wire.split_once("\r\n\r\n").unwrap();
+        let declared: usize = header
+            .trim_start_matches("Content-Length: ")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(declared, body.len());
+        assert_ne!(declared, body.chars().count());
+    }
 }

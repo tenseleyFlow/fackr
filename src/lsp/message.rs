@@ -22,12 +22,18 @@ pub type ResponseCallback = Box<dyn FnOnce(i64, LspResult<Value>) + Send>;
 /// Callback for diagnostics notifications
 pub type DiagnosticsCallback = Box<dyn Fn(String, Vec<Diagnostic>) + Send>;
 
+/// Callback for `window/logMessage` and `window/showMessage`, carrying the
+/// LSP `MessageType` (1 = error … 4 = log) and the text.
+pub type LogCallback = Box<dyn Fn(u8, String) + Send>;
+
 /// Tracks pending requests and their callbacks
 pub struct MessageHandler {
     /// Pending request callbacks indexed by request ID
     pending: HashMap<i64, ResponseCallback>,
     /// Callback for diagnostics notifications
     diagnostics_callback: Option<DiagnosticsCallback>,
+    /// Callback for `window/logMessage` / `window/showMessage`
+    log_callback: Option<LogCallback>,
 }
 
 impl MessageHandler {
@@ -35,6 +41,7 @@ impl MessageHandler {
         Self {
             pending: HashMap::new(),
             diagnostics_callback: None,
+            log_callback: None,
         }
     }
 
@@ -46,6 +53,19 @@ impl MessageHandler {
     /// Set the diagnostics callback
     pub fn set_diagnostics_callback(&mut self, callback: DiagnosticsCallback) {
         self.diagnostics_callback = Some(callback);
+    }
+
+    /// Set the server-message callback
+    pub fn set_log_callback(&mut self, callback: LogCallback) {
+        self.log_callback = Some(callback);
+    }
+
+    /// Push a client-originated note down the same channel the server's own
+    /// messages take, so one place holds everything about this server.
+    pub fn note_server_message(&self, level: u8, text: String) {
+        if let Some(callback) = &self.log_callback {
+            callback(level, text);
+        }
     }
 
     /// Handle an incoming message
@@ -88,9 +108,22 @@ impl MessageHandler {
                 }
             }
             "window/logMessage" | "window/showMessage" => {
-                // Silently ignore server log messages
-                // These could be surfaced to the status bar via a callback if needed
-                let _ = params;
+                // A server that fails to start says so here and nowhere else,
+                // so these are kept rather than dropped. `type` is the LSP
+                // MessageType: 1 error, 2 warning, 3 info, 4 log.
+                if let (Some(params), Some(callback)) = (params, &self.log_callback) {
+                    let level = params
+                        .get("type")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(4)
+                        .min(u8::MAX as u64) as u8;
+                    let text = params
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    callback(level, text);
+                }
             }
             _ => {
                 // Ignore other notifications

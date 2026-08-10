@@ -17,6 +17,8 @@ mod message;
 mod process;
 mod protocol;
 pub mod server_manager;
+#[cfg(test)]
+mod smoke_wolf;
 mod types;
 
 pub use client::{LspClient, LspResponse};
